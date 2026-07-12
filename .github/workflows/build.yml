@@ -20,23 +20,29 @@ jobs:
     - name: Setup Android SDK
       uses: android-actions/setup-android@v3
 
-    - name: Show repo structure
-      run: find . -maxdepth 4 -name "*.gradle" -o -name "settings.gradle" | head -20
+    - name: Show full repo structure
+      run: |
+        echo "=== ROOT FILES ==="
+        ls -la
+        echo "=== ALL GRADLE FILES ==="
+        find . -name "*.gradle" | sort
+        echo "=== SETTINGS FILES ==="
+        find . -name "settings.gradle" | sort
 
     - name: Build APK
       run: |
         wget -q https://services.gradle.org/distributions/gradle-8.1.1-bin.zip
         unzip -q gradle-8.1.1-bin.zip
-        GRADLE=./gradle-8.1.1/bin/gradle
-        # Find where settings.gradle is
-        SETTINGS=$(find . -name "settings.gradle" | head -1)
-        BUILD_DIR=$(dirname "$SETTINGS")
-        echo "Found build dir: $BUILD_DIR"
-        cd "$BUILD_DIR"
-        $OLDPWD/$GRADLE assembleDebug
+        GRADLE=$(pwd)/gradle-8.1.1/bin/gradle
+        chmod +x $GRADLE
+        # Run from repo root where settings.gradle should be
+        $GRADLE assembleDebug --stacktrace
 
-    - name: Find and upload APK
+    - name: Find APK
+      run: find . -name "*.apk" | sort
+
+    - name: Upload APK
       uses: actions/upload-artifact@v4
       with:
         name: SARASWATI-APK
-        path: "**/app-debug.apk"
+        path: "**/*.apk"
