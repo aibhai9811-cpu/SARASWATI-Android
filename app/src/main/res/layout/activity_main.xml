@@ -1,0 +1,199 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:background="#000B16">
+
+    <!-- SETUP SCREEN -->
+    <LinearLayout
+        android:id="@+id/setupLayout"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:orientation="vertical"
+        android:gravity="center"
+        android:padding="32dp"
+        android:visibility="gone">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="🤖"
+            android:textSize="64sp"
+            android:layout_marginBottom="16dp"/>
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="SARASWATI"
+            android:textSize="28sp"
+            android:textColor="#00D4FF"
+            android:letterSpacing="0.3"
+            android:textStyle="bold"
+            android:layout_marginBottom="4dp"/>
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="PERSONAL A.I. SYSTEM"
+            android:textSize="11sp"
+            android:textColor="#4400D4FF"
+            android:letterSpacing="0.25"
+            android:layout_marginBottom="40dp"/>
+
+        <EditText
+            android:id="@+id/apiKeyInput"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="Enter your OpenRouter API Key (sk-or-...)"
+            android:textColorHint="#4400D4FF"
+            android:textColor="#C5EAFF"
+            android:inputType="textPassword"
+            android:padding="16dp"
+            android:background="@drawable/bg_input"
+            android:layout_marginBottom="16dp"/>
+
+        <Button
+            android:id="@+id/saveKeyBtn"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="INITIALIZE SARASWATI"
+            android:textColor="#FFFFFF"
+            android:letterSpacing="0.15"
+            android:background="@drawable/bg_button"
+            android:padding="16dp"/>
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Get a free key at openrouter.ai"
+            android:textSize="11sp"
+            android:textColor="#3300D4FF"
+            android:layout_marginTop="20dp"/>
+
+    </LinearLayout>
+
+    <!-- MAIN UI -->
+    <LinearLayout
+        android:id="@+id/mainLayout"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:orientation="vertical"
+        android:visibility="gone">
+
+        <!-- Header -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:padding="16dp"
+            android:background="#CC000A20"
+            android:gravity="center_vertical">
+
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:orientation="vertical">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="SARASWATI"
+                    android:textColor="#00D4FF"
+                    android:textSize="14sp"
+                    android:letterSpacing="0.3"
+                    android:textStyle="bold"/>
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="PERSONAL A.I. SYSTEM"
+                    android:textColor="#4400D4FF"
+                    android:textSize="8sp"
+                    android:letterSpacing="0.2"/>
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:gravity="end">
+
+                <TextView
+                    android:id="@+id/clockText"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="00:00:00"
+                    android:textColor="#00D4FF"
+                    android:textSize="16sp"
+                    android:fontFamily="monospace"/>
+
+                <TextView
+                    android:id="@+id/statusText"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="ALL SYSTEMS NOMINAL"
+                    android:textColor="#3300D4FF"
+                    android:textSize="8sp"
+                    android:letterSpacing="0.15"/>
+            </LinearLayout>
+        </LinearLayout>
+
+        <!-- Arc Reactor -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:gravity="center"
+            android:paddingTop="20dp"
+            android:paddingBottom="8dp">
+
+            <com.aibhai.saraswati.ArcReactorView
+                android:id="@+id/arcReactor"
+                android:layout_width="120dp"
+                android:layout_height="120dp"/>
+
+            <TextView
+                android:id="@+id/stateLabel"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="STANDBY"
+                android:textColor="#00D4FF"
+                android:textSize="9sp"
+                android:letterSpacing="0.35"
+                android:layout_marginTop="24dp"/>
+
+        </LinearLayout>
+
+        <!-- Chat area -->
+        <ScrollView
+            android:id="@+id/scrollView"
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1"
+            android:padding="12dp"
+            android:clipToPadding="false">
+
+            <LinearLayout
+                android:id="@+id/chatContainer"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"/>
+
+        </ScrollView>
+
+        <!-- Bottom hint -->
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text='Say "Hey Saraswati" to activate • "Stop" to end • Tap mic to talk'
+            android:textColor="#2200D4FF"
+            android:textSize="9sp"
+            android:gravity="center"
+            android:padding="10dp"
+            android:letterSpacing="0.05"/>
+
+    </LinearLayout>
+
+</LinearLayout>
