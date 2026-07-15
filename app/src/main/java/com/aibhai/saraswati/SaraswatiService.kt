@@ -43,13 +43,10 @@ class SaraswatiService : Service(), TextToSpeech.OnInitListener {
         instance = this
         createNotificationChannel()
         startForeground(NOTIFICATION_ID, buildNotification("Standby — Say \"Hey Saraswati\""))
-
         tts = TextToSpeech(this, this)
         commandProcessor = CommandProcessor(this)
         openRouterClient = OpenRouterClient(this)
     }
-
-    override fun onTtsInit(status: Int) = onInit(status)
 
     override fun onInit(status: Int) {
         if (status == TextToSpeech.SUCCESS) {
@@ -63,8 +60,6 @@ class SaraswatiService : Service(), TextToSpeech.OnInitListener {
             }, 1000)
         }
     }
-
-    // ── SPEECH RECOGNITION ──
 
     fun startWakeWordListening() {
         if (wakeWordPaused || isListening) return
@@ -82,13 +77,15 @@ class SaraswatiService : Service(), TextToSpeech.OnInitListener {
                 override fun onResults(results: Bundle?) {
                     isListening = false
                     val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                    val transcript = matches?.firstOrNull()?.lowercase()?.trim() ?: return
+                    val transcript = matches?.firstOrNull()?.lowercase()?.trim() ?: run {
+                        if (!wakeWordPaused && !restartScheduled) scheduleRestart(800)
+                        return
+                    }
                     handleTranscript(transcript)
                 }
 
                 override fun onError(error: Int) {
                     isListening = false
-                    // Silently restart on no-speech, network, etc.
                     if (!wakeWordPaused && !restartScheduled) scheduleRestart(1200)
                 }
 
@@ -114,8 +111,6 @@ class SaraswatiService : Service(), TextToSpeech.OnInitListener {
 
     private fun handleTranscript(transcript: String) {
         val now = System.currentTimeMillis()
-
-        // Duplicate guard
         if (transcript == lastTranscript && (now - lastTranscriptTime) < DUPLICATE_GUARD_MS) {
             if (!wakeWordPaused && !restartScheduled) scheduleRestart(800)
             return
@@ -123,7 +118,6 @@ class SaraswatiService : Service(), TextToSpeech.OnInitListener {
         lastTranscript = transcript
         lastTranscriptTime = now
 
-        // Check exit words (in conversation mode)
         if (conversationMode && EXIT_WORDS.any { transcript.contains(it) }) {
             conversationMode = false
             wakeWordPaused = false
@@ -133,7 +127,6 @@ class SaraswatiService : Service(), TextToSpeech.OnInitListener {
             return
         }
 
-        // In conversation mode — process as command directly
         if (conversationMode) {
             uiCallback?.invoke("thinking", transcript, "")
             wakeWordPaused = true
@@ -141,27 +134,21 @@ class SaraswatiService : Service(), TextToSpeech.OnInitListener {
             return
         }
 
-        // Check for wake word
         val heardWakeWord = WAKE_WORDS.any { transcript.contains(it) }
         if (heardWakeWord) {
             var command = transcript
             WAKE_WORDS.forEach { command = command.replace(it, "").trim() }
-
             conversationMode = true
             wakeWordPaused = true
-
             if (command.length > 2) {
-                // Wake word + command in one breath
                 uiCallback?.invoke("thinking", command, "")
                 processCommand(command)
             } else {
-                // Just the wake word — acknowledge
                 speak("Yes, I'm listening.")
                 scheduleRestart(1500)
                 wakeWordPaused = false
             }
         } else {
-            // Not a wake word, not in conversation mode — just keep listening
             if (!restartScheduled) scheduleRestart(400)
         }
     }
@@ -175,14 +162,11 @@ class SaraswatiService : Service(), TextToSpeech.OnInitListener {
         }, delayMs)
     }
 
-    // ── COMMAND PROCESSING ──
-
     private fun processCommand(command: String) {
         serviceScope.launch {
             uiCallback?.invoke("thinking", command, "")
             updateNotification("Processing: $command")
 
-            // First check if it's a phone action command (no AI needed)
             val phoneResult = commandProcessor.tryHandleLocally(command)
             if (phoneResult != null) {
                 uiCallback?.invoke("speaking", "", phoneResult)
@@ -191,7 +175,6 @@ class SaraswatiService : Service(), TextToSpeech.OnInitListener {
                 return@launch
             }
 
-            // Otherwise send to AI
             val now = java.util.Calendar.getInstance()
             val timeStr = String.format("%02d:%02d %s",
                 now.get(java.util.Calendar.HOUR),
@@ -201,8 +184,7 @@ class SaraswatiService : Service(), TextToSpeech.OnInitListener {
 
             val systemPrompt = """You are SARASWATI (Self-Aware Responsive A.I. System for Wisdom, Assistance, Tasks & Information).
 Current time: $timeStr IST | Date: $dateStr
-Personality: calm, warm, wise. Keep responses SHORT (1-2 sentences max) — optimized for voice output.
-Never use markdown, asterisks, or bullet points in your response — plain speech only."""
+Be concise — 1-2 sentences max. Plain speech only, no markdown."""
 
             val reply = openRouterClient.chat(systemPrompt, command)
             uiCallback?.invoke("speaking", "", reply)
@@ -217,8 +199,6 @@ Never use markdown, asterisks, or bullet points in your response — plain speec
         scheduleRestart(800)
     }
 
-    // ── TEXT TO SPEECH ──
-
     fun speak(text: String) {
         tts?.stop()
         uiCallback?.invoke("speaking", "", "")
@@ -229,17 +209,13 @@ Never use markdown, asterisks, or bullet points in your response — plain speec
         tts?.speak(text, TextToSpeech.QUEUE_FLUSH, params, "saraswati_utt")
     }
 
-    // ── NOTIFICATION ──
-
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
-                CHANNEL_ID,
-                "SARASWATI Service",
-                NotificationManager.IMPORTANCE_LOW
+                CHANNEL_ID, "SARASWATI Service", NotificationManager.IMPORTANCE_LOW
             ).apply {
                 description = "SARASWATI is running in background"
-                setSound(null, null) // NO sound for this notification
+                setSound(null, null)
             }
             getSystemService(NotificationManager::class.java)?.createNotificationChannel(channel)
         }
@@ -254,7 +230,7 @@ Never use markdown, asterisks, or bullet points in your response — plain speec
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
             .setContentIntent(pi)
             .setOngoing(true)
-            .setSilent(true) // KEY: silent notification = no ding sound
+            .setSilent(true)
             .build()
     }
 
@@ -263,10 +239,7 @@ Never use markdown, asterisks, or bullet points in your response — plain speec
         nm?.notify(NOTIFICATION_ID, buildNotification(text))
     }
 
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        return START_STICKY
-    }
-
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_STICKY
     override fun onBind(intent: Intent?) = null
 
     override fun onDestroy() {
