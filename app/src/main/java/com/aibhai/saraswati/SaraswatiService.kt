@@ -90,6 +90,14 @@ class SaraswatiService : Service(), TextToSpeech.OnInitListener {
             Handler(Looper.getMainLooper()).postDelayed({
                 speak("Namaste. I am SARASWATI, your personal AI assistant. Say Hey Saraswati anytime to activate me.")
             }, 1000)
+
+            // Fallback: if TTS fails to trigger onDone, start listening after 5 seconds
+            Handler(Looper.getMainLooper()).postDelayed({
+                if (!isListening && !sessionActive && !isSpeaking) {
+                    wakeWordPaused = false
+                    startContinuousListening()
+                }
+            }, 5000)
         }
     }
 
@@ -109,8 +117,11 @@ class SaraswatiService : Service(), TextToSpeech.OnInitListener {
             recognizer?.setRecognitionListener(object : RecognitionListener {
 
                 override fun onReadyForSpeech(params: Bundle?) {
-                    // Silent — no notification sound, no UI update
-                    // Just keep listening in background
+                    // Update UI to show we're ready but don't make noise
+                    Handler(Looper.getMainLooper()).post {
+                        uiCallback?.invoke("idle", "", "")
+                        updateNotification("Listening — Say \"Hey Saraswati\"")
+                    }
                 }
 
                 override fun onBeginningOfSpeech() {
