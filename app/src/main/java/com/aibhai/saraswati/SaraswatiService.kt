@@ -146,7 +146,7 @@ class SaraswatiService : Service(), TextToSpeech.OnInitListener {
                         SpeechRecognizer.ERROR_NO_MATCH -> 300L
                         SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> 300L
                         SpeechRecognizer.ERROR_NETWORK -> 2000L
-                        SpeechRecognizer.ERROR_NOT_ALLOWED -> { wakeWordPaused = true; return }
+                        9 -> { wakeWordPaused = true; return }
                         else -> 500L
                     }
                     Handler(Looper.getMainLooper()).postDelayed({
