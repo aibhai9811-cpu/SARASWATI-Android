@@ -2,6 +2,7 @@ package com.aibhai.saraswati
 
 import android.content.*
 import android.net.Uri
+import android.provider.AlarmClock
 import android.provider.ContactsContract
 import android.provider.Settings
 import android.app.AlarmManager
@@ -12,30 +13,23 @@ import java.util.*
 
 class CommandProcessor(private val context: Context) {
 
-    // Returns a spoken response string if handled locally, null if should go to AI
     fun tryHandleLocally(command: String): String? {
         val cmd = command.lowercase().trim()
 
         return when {
-            // ── PHONE CALLS ──
             cmd.startsWith("call ") -> handleCall(cmd.removePrefix("call ").trim())
 
-            // ── WHATSAPP ──
             cmd.startsWith("whatsapp ") || cmd.contains("send whatsapp") || cmd.contains("message on whatsapp") ->
                 handleWhatsApp(cmd)
 
-            // ── OPEN APP ──
             cmd.startsWith("open ") -> handleOpenApp(cmd.removePrefix("open ").trim())
 
-            // ── GOOGLE SEARCH ──
             cmd.startsWith("search ") || cmd.startsWith("google ") || cmd.startsWith("search for ") ->
                 handleSearch(cmd)
 
-            // ── SET ALARM ──
             cmd.contains("set alarm") || cmd.contains("alarm for") || cmd.contains("wake me") ->
                 handleAlarm(cmd)
 
-            // ── WHAT TIME ──
             cmd.contains("what time") || cmd.contains("current time") || cmd == "time" -> {
                 val now = Calendar.getInstance()
                 val hour = now.get(Calendar.HOUR)
@@ -44,7 +38,6 @@ class CommandProcessor(private val context: Context) {
                 "The current time is ${if (hour == 0) 12 else hour}:${String.format("%02d", min)} $ampm."
             }
 
-            // ── WHAT DATE ──
             cmd.contains("what date") || cmd.contains("today's date") || cmd.contains("what day") -> {
                 val now = Calendar.getInstance()
                 val days = arrayOf("Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday")
@@ -52,7 +45,6 @@ class CommandProcessor(private val context: Context) {
                 "Today is ${days[now.get(Calendar.DAY_OF_WEEK)-1]}, ${now.get(Calendar.DAY_OF_MONTH)} ${months[now.get(Calendar.MONTH)]} ${now.get(Calendar.YEAR)}."
             }
 
-            // ── FLASHLIGHT ──
             cmd.contains("flashlight on") || cmd.contains("torch on") -> {
                 toggleFlashlight(true)
                 "Flashlight turned on."
@@ -62,28 +54,24 @@ class CommandProcessor(private val context: Context) {
                 "Flashlight turned off."
             }
 
-            // ── SETTINGS ──
             cmd.contains("open settings") || cmd.contains("go to settings") -> {
                 val intent = Intent(Settings.ACTION_SETTINGS).apply { flags = Intent.FLAG_ACTIVITY_NEW_TASK }
                 context.startActivity(intent)
                 "Opening settings."
             }
 
-            // ── WIFI SETTINGS ──
             cmd.contains("wifi") && cmd.contains("setting") -> {
                 val intent = Intent(Settings.ACTION_WIFI_SETTINGS).apply { flags = Intent.FLAG_ACTIVITY_NEW_TASK }
                 context.startActivity(intent)
                 "Opening WiFi settings."
             }
 
-            // ── BLUETOOTH SETTINGS ──
             cmd.contains("bluetooth") && cmd.contains("setting") -> {
                 val intent = Intent(Settings.ACTION_BLUETOOTH_SETTINGS).apply { flags = Intent.FLAG_ACTIVITY_NEW_TASK }
                 context.startActivity(intent)
                 "Opening Bluetooth settings."
             }
 
-            // ── YOUTUBE ──
             cmd.contains("open youtube") || cmd.startsWith("youtube") -> {
                 launchApp("com.google.android.youtube") ?: run {
                     openUrl("https://youtube.com")
@@ -91,17 +79,14 @@ class CommandProcessor(private val context: Context) {
                 }
             }
 
-            // ── PLAY MUSIC ──
             cmd.contains("play music") || cmd.contains("open spotify") -> {
                 launchApp("com.spotify.music") ?: launchApp("com.google.android.music") ?: "I couldn't find a music app."
             }
 
-            // Not a local command — send to AI
             else -> null
         }
     }
 
-    // ── CALL HANDLER ──
     private fun handleCall(nameOrNumber: String): String {
         val number = if (nameOrNumber.all { it.isDigit() || it == '+' || it == '-' }) {
             nameOrNumber
@@ -115,7 +100,6 @@ class CommandProcessor(private val context: Context) {
             context.startActivity(intent)
             "Calling $nameOrNumber now."
         } catch (e: Exception) {
-            // Fallback to dialer if CALL_PHONE permission not granted
             val intent = Intent(Intent.ACTION_DIAL, Uri.parse("tel:$number")).apply {
                 flags = Intent.FLAG_ACTIVITY_NEW_TASK
             }
@@ -124,9 +108,7 @@ class CommandProcessor(private val context: Context) {
         }
     }
 
-    // ── WHATSAPP HANDLER ──
     private fun handleWhatsApp(cmd: String): String {
-        // Pattern: "whatsapp [name]: [message]" or "send whatsapp to [name] [message]"
         return try {
             var name = ""
             var message = ""
@@ -159,7 +141,6 @@ class CommandProcessor(private val context: Context) {
                 if (message.isNotEmpty()) "Opening WhatsApp to send message to $name."
                 else "Opening WhatsApp chat with $name."
             } else {
-                // Open WhatsApp directly without a number
                 launchApp("com.whatsapp") ?: "WhatsApp is not installed."
             }
         } catch (e: Exception) {
@@ -167,7 +148,6 @@ class CommandProcessor(private val context: Context) {
         }
     }
 
-    // ── APP LAUNCHER ──
     private fun handleOpenApp(appName: String): String {
         val packageMap = mapOf(
             "chrome" to "com.android.chrome",
@@ -185,17 +165,15 @@ class CommandProcessor(private val context: Context) {
             "spotify" to "com.spotify.music",
             "telegram" to "org.telegram.messenger",
             "netflix" to "com.netflix.mediaclient",
-            "amazon" to "in.amazon.mShop.android.shopping",
-            "flipkart" to "com.flipkart.android",
+            "settings" to "com.android.settings",
+            "play store" to "com.android.vending",
+            "contacts" to "com.android.contacts",
+            "messages" to "com.google.android.apps.messaging",
             "paytm" to "net.one97.paytm",
             "phonepe" to "com.phonepe.app",
             "gpay" to "com.google.android.apps.nbu.paisa.user",
             "photos" to "com.google.android.apps.photos",
-            "files" to "com.google.android.apps.nbu.files",
-            "settings" to "com.android.settings",
-            "play store" to "com.android.vending",
-            "contacts" to "com.android.contacts",
-            "messages" to "com.google.android.apps.messaging"
+            "files" to "com.google.android.apps.nbu.files"
         )
 
         val pkg = packageMap[appName.lowercase()]
@@ -204,21 +182,19 @@ class CommandProcessor(private val context: Context) {
         return if (pkg != null) {
             launchApp(pkg) ?: "App not found on this device."
         } else {
-            // Try searching by name
             val pm = context.packageManager
             val apps = pm.getInstalledApplications(PackageManager.GET_META_DATA)
             val match = apps.firstOrNull {
                 pm.getApplicationLabel(it).toString().lowercase().contains(appName.lowercase())
             }
             if (match != null) {
-                launchApp(match.packageName) ?: "Could not open ${appName}."
+                launchApp(match.packageName) ?: "Could not open $appName."
             } else {
                 "I couldn't find $appName on your device."
             }
         }
     }
 
-    // ── SEARCH HANDLER ──
     private fun handleSearch(cmd: String): String {
         val query = cmd
             .removePrefix("search for ")
@@ -238,9 +214,7 @@ class CommandProcessor(private val context: Context) {
         }
     }
 
-    // ── ALARM HANDLER ──
     private fun handleAlarm(cmd: String): String {
-        // Extract time from command like "set alarm for 7 AM" or "wake me at 6:30"
         val timeRegex = Regex("""(\d{1,2})(?::(\d{2}))?\s*(am|pm)?""", RegexOption.IGNORE_CASE)
         val match = timeRegex.find(cmd)
 
@@ -270,13 +244,12 @@ class CommandProcessor(private val context: Context) {
         }
     }
 
-    // ── HELPERS ──
-
     private fun lookupContact(name: String): String? {
         return try {
             val cursor = context.contentResolver.query(
                 ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
-                arrayOf(ContactsContract.CommonDataKinds.Phone.NUMBER, ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME),
+                arrayOf(ContactsContract.CommonDataKinds.Phone.NUMBER,
+                    ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME),
                 "${ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME} LIKE ?",
                 arrayOf("%$name%"), null
             )
@@ -312,9 +285,10 @@ class CommandProcessor(private val context: Context) {
 
     private fun toggleFlashlight(on: Boolean) {
         try {
-            val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as android.hardware.camera2.CameraManager
+            val cameraManager = context.getSystemService(Context.CAMERA_SERVICE)
+                    as android.hardware.camera2.CameraManager
             val cameraId = cameraManager.cameraIdList[0]
             cameraManager.setTorchMode(cameraId, on)
-        } catch (e: Exception) { /* not supported */ }
+        } catch (e: Exception) { }
     }
 }
