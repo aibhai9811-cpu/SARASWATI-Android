@@ -21,13 +21,14 @@ class SaraswatiService : Service(), TextToSpeech.OnInitListener {
     private var tts: TextToSpeech? = null
     private var recognizer: SpeechRecognizer? = null
     private var isListening = false
-    private var isSpeaking = false          // ← KEY: tracks when TTS is active
+    private var isSpeaking = false
     private var conversationMode = false
     private var wakeWordPaused = false
     private var ttsReady = false
+    private var isProcessingCommand = false
 
     private val WAKE_WORDS = listOf("hey saraswati", "saraswati", "hi saraswati", "ok saraswati")
-    private val EXIT_WORDS = listOf("stop", "exit", "goodbye", "go to sleep", "bye saraswati")
+    private val EXIT_WORDS = listOf("stop", "exit", "goodbye", "go to sleep", "bye saraswati", "sleep")
 
     private val serviceScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     private lateinit var commandProcessor: CommandProcessor
@@ -36,17 +37,16 @@ class SaraswatiService : Service(), TextToSpeech.OnInitListener {
     private var lastTranscript = ""
     private var lastTranscriptTime = 0L
     private val DUPLICATE_GUARD_MS = 3000L
-    private var restartScheduled = false
 
-    // How long to wait after TTS finishes before listening again
-    // This gives time for speaker sound to dissipate so mic doesn't pick it up
-    private val POST_SPEECH_DELAY_MS = 1200L
+    // ── Single persistent recognizer session ──
+    // Instead of restarting every few seconds, we keep ONE session open continuously
+    private var sessionActive = false
 
     override fun onCreate() {
         super.onCreate()
         instance = this
         createNotificationChannel()
-        startForeground(NOTIFICATION_ID, buildNotification("Standby — Say \"Hey Saraswati\""))
+        startForeground(NOTIFICATION_ID, buildNotification("SARASWATI — Initializing..."))
         tts = TextToSpeech(this, this)
         commandProcessor = CommandProcessor(this)
         openRouterClient = OpenRouterClient(this)
@@ -55,118 +55,151 @@ class SaraswatiService : Service(), TextToSpeech.OnInitListener {
     override fun onInit(status: Int) {
         if (status == TextToSpeech.SUCCESS) {
             tts?.language = Locale("en", "IN")
-            tts?.setSpeechRate(0.9f)
+            tts?.setSpeechRate(0.92f)
             tts?.setPitch(0.85f)
             ttsReady = true
 
-            // Set up TTS completion listener — CRITICAL for echo prevention
             tts?.setOnUtteranceProgressListener(object : android.speech.tts.UtteranceProgressListener() {
                 override fun onStart(utteranceId: String?) {
                     isSpeaking = true
-                    wakeWordPaused = true   // stop listening while speaking
-                    stopListening()          // explicitly stop mic
-                    uiCallback?.invoke("speaking", "", "")
+                    stopCurrentRecognizer() // stop mic while speaking
+                    Handler(Looper.getMainLooper()).post {
+                        uiCallback?.invoke("speaking", "", "")
+                        updateNotification("Speaking...")
+                    }
                 }
                 override fun onDone(utteranceId: String?) {
                     isSpeaking = false
-                    uiCallback?.invoke("idle", "", "")
-                    updateNotification("Listening for \"Hey Saraswati\"...")
-                    // Wait for speaker echo to die down BEFORE restarting mic
                     Handler(Looper.getMainLooper()).postDelayed({
-                        wakeWordPaused = false
-                        restartScheduled = false
-                        startWakeWordListening()
-                    }, POST_SPEECH_DELAY_MS)
+                        // Resume listening only if we should be
+                        if (!wakeWordPaused && !isProcessingCommand) {
+                            Handler(Looper.getMainLooper()).post {
+                                uiCallback?.invoke("idle", "", "")
+                                updateNotification("Listening — Say \"Hey Saraswati\"")
+                            }
+                            startContinuousListening()
+                        }
+                    }, 1500) // 1.5s delay so speaker echo dies down
                 }
                 override fun onError(utteranceId: String?) {
                     isSpeaking = false
-                    Handler(Looper.getMainLooper()).postDelayed({
-                        wakeWordPaused = false
-                        restartScheduled = false
-                        startWakeWordListening()
-                    }, POST_SPEECH_DELAY_MS)
+                    if (!wakeWordPaused && !isProcessingCommand) startContinuousListening()
                 }
             })
 
-            // Wait before initial greeting so app is fully ready
             Handler(Looper.getMainLooper()).postDelayed({
-                speak("Namaste. I am SARASWATI, your personal AI system. Say Hey Saraswati to activate me.")
-            }, 1500)
+                speak("Namaste. I am SARASWATI, your personal AI assistant. Say Hey Saraswati anytime to activate me.")
+            }, 1000)
         }
     }
 
-    private fun stopListening() {
-        try {
-            recognizer?.stopListening()
-            recognizer?.destroy()
-            recognizer = null
-            isListening = false
-        } catch (e: Exception) { }
-    }
+    // ── CONTINUOUS LISTENING — one long session, no repeated restarts ──
+    private fun startContinuousListening() {
+        if (isSpeaking || isProcessingCommand || wakeWordPaused || sessionActive) return
 
-    fun startWakeWordListening() {
-        if (wakeWordPaused || isListening || isSpeaking) return
         Handler(Looper.getMainLooper()).post {
-            try {
-                recognizer?.destroy()
-                recognizer = SpeechRecognizer.createSpeechRecognizer(this)
-                recognizer?.setRecognitionListener(object : RecognitionListener {
+            if (isSpeaking || isProcessingCommand || sessionActive) return@post
 
-                    override fun onReadyForSpeech(params: Bundle?) {
-                        isListening = true
-                        updateNotification("Listening for \"Hey Saraswati\"...")
-                    }
+            stopCurrentRecognizer()
+            sessionActive = true
+            isListening = true
+            uiCallback?.invoke("idle", "", "")
 
-                    override fun onResults(results: Bundle?) {
-                        isListening = false
-                        val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                        val transcript = matches?.firstOrNull()?.lowercase()?.trim() ?: run {
-                            if (!wakeWordPaused && !restartScheduled && !isSpeaking) scheduleRestart(800)
-                            return
-                        }
-                        handleTranscript(transcript)
-                    }
+            recognizer = SpeechRecognizer.createSpeechRecognizer(this)
+            recognizer?.setRecognitionListener(object : RecognitionListener {
 
-                    override fun onError(error: Int) {
-                        isListening = false
-                        if (!wakeWordPaused && !restartScheduled && !isSpeaking) scheduleRestart(1200)
-                    }
-
-                    override fun onEndOfSpeech() { isListening = false }
-                    override fun onBeginningOfSpeech() { uiCallback?.invoke("listening", "", "") }
-                    override fun onBufferReceived(buffer: ByteArray?) {}
-                    override fun onPartialResults(partialResults: Bundle?) {}
-                    override fun onEvent(eventType: Int, params: Bundle?) {}
-                    override fun onRmsChanged(rmsdB: Float) {}
-                })
-
-                val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-                    putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-                    putExtra(RecognizerIntent.EXTRA_LANGUAGE, "en-IN")
-                    putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
-                    putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false)
-                    // Longer silence timeout so full sentences are captured
-                    putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 1500L)
-                    putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 500L)
+                override fun onReadyForSpeech(params: Bundle?) {
+                    // Silent — no notification sound, no UI update
+                    // Just keep listening in background
                 }
+
+                override fun onBeginningOfSpeech() {
+                    if (!isSpeaking) uiCallback?.invoke("listening", "", "")
+                }
+
+                override fun onResults(results: Bundle?) {
+                    isListening = false
+                    sessionActive = false
+                    if (isSpeaking || isProcessingCommand) return
+
+                    val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                    val transcript = matches?.firstOrNull()?.lowercase()?.trim() ?: run {
+                        // No speech detected — silently restart
+                        if (!wakeWordPaused && !isSpeaking) {
+                            Handler(Looper.getMainLooper()).postDelayed({
+                                startContinuousListening()
+                            }, 200)
+                        }
+                        return
+                    }
+
+                    handleTranscript(transcript)
+                }
+
+                override fun onError(error: Int) {
+                    isListening = false
+                    sessionActive = false
+                    if (isSpeaking || isProcessingCommand || wakeWordPaused) return
+
+                    // Silently restart — no notification, no sound
+                    val delay = when (error) {
+                        SpeechRecognizer.ERROR_NO_MATCH -> 300L
+                        SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> 300L
+                        SpeechRecognizer.ERROR_NETWORK -> 2000L
+                        SpeechRecognizer.ERROR_NOT_ALLOWED -> { wakeWordPaused = true; return }
+                        else -> 500L
+                    }
+                    Handler(Looper.getMainLooper()).postDelayed({
+                        if (!isSpeaking && !isProcessingCommand && !wakeWordPaused)
+                            startContinuousListening()
+                    }, delay)
+                }
+
+                override fun onEndOfSpeech() {}
+                override fun onBufferReceived(buffer: ByteArray?) {}
+                override fun onPartialResults(partialResults: Bundle?) {}
+                override fun onEvent(eventType: Int, params: Bundle?) {}
+                override fun onRmsChanged(rmsdB: Float) {}
+            })
+
+            val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE, "en-IN")
+                putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+                putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false)
+                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 1500L)
+                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 300L)
+            }
+            try {
                 recognizer?.startListening(intent)
             } catch (e: Exception) {
-                if (!restartScheduled && !isSpeaking) scheduleRestart(1000)
+                sessionActive = false
+                isListening = false
             }
         }
     }
 
+    private fun stopCurrentRecognizer() {
+        try {
+            recognizer?.stopListening()
+            recognizer?.destroy()
+            recognizer = null
+        } catch (e: Exception) {}
+        isListening = false
+        sessionActive = false
+    }
+
     private fun handleTranscript(transcript: String) {
-        // Ignore if we're speaking — this catches any echo that slipped through
         if (isSpeaking) {
-            scheduleRestart(POST_SPEECH_DELAY_MS)
+            // Picked up our own voice — ignore completely
+            Handler(Looper.getMainLooper()).postDelayed({ startContinuousListening() }, 500)
             return
         }
 
+        // Duplicate guard
         val now = System.currentTimeMillis()
-        // Duplicate guard — prevents same phrase being processed twice
         if (transcript == lastTranscript && (now - lastTranscriptTime) < DUPLICATE_GUARD_MS) {
-            if (!wakeWordPaused && !restartScheduled) scheduleRestart(800)
+            Handler(Looper.getMainLooper()).postDelayed({ startContinuousListening() }, 300)
             return
         }
         lastTranscript = transcript
@@ -175,15 +208,17 @@ class SaraswatiService : Service(), TextToSpeech.OnInitListener {
         // Exit conversation mode
         if (conversationMode && EXIT_WORDS.any { transcript.contains(it) }) {
             conversationMode = false
+            isProcessingCommand = false
             uiCallback?.invoke("idle", transcript, "")
-            speak("Going to sleep. Say Hey Saraswati to wake me again.")
+            speak("Going to sleep. Say Hey Saraswati to wake me.")
             return
         }
 
-        // In conversation mode — treat everything as a command
+        // In conversation mode — process as command
         if (conversationMode) {
-            uiCallback?.invoke("thinking", transcript, "")
+            isProcessingCommand = true
             wakeWordPaused = true
+            uiCallback?.invoke("thinking", transcript, "")
             processCommand(transcript)
             return
         }
@@ -192,59 +227,64 @@ class SaraswatiService : Service(), TextToSpeech.OnInitListener {
         val heardWakeWord = WAKE_WORDS.any { transcript.contains(it) }
         if (heardWakeWord) {
             var command = transcript
-            WAKE_WORDS.forEach { command = command.replace(it, "").trim() }
+            WAKE_WORDS.sortedByDescending { it.length }.forEach { w ->
+                command = command.replace(w, "").trim()
+            }
             conversationMode = true
-            wakeWordPaused = true
 
             if (command.length > 2) {
+                isProcessingCommand = true
+                wakeWordPaused = true
                 uiCallback?.invoke("thinking", command, "")
                 processCommand(command)
             } else {
                 speak("Yes, I'm listening.")
             }
         } else {
-            // Not a wake word — keep listening
-            if (!restartScheduled && !isSpeaking) scheduleRestart(400)
+            // Not a wake word — restart silently
+            Handler(Looper.getMainLooper()).postDelayed({ startContinuousListening() }, 200)
         }
-    }
-
-    private fun scheduleRestart(delayMs: Long) {
-        if (restartScheduled || isSpeaking) return
-        restartScheduled = true
-        Handler(Looper.getMainLooper()).postDelayed({
-            restartScheduled = false
-            if (!wakeWordPaused && !isListening && !isSpeaking) startWakeWordListening()
-        }, delayMs)
     }
 
     private fun processCommand(command: String) {
         serviceScope.launch {
             uiCallback?.invoke("thinking", command, "")
-            updateNotification("Processing: $command")
+            updateNotification("Processing...")
 
             val phoneResult = commandProcessor.tryHandleLocally(command)
             if (phoneResult != null) {
+                isProcessingCommand = false
+                wakeWordPaused = false
                 uiCallback?.invoke("speaking", "", phoneResult)
                 speak(phoneResult)
                 return@launch
             }
 
-            val cal = java.util.Calendar.getInstance()
-            val timeStr = String.format("%02d:%02d %s",
-                cal.get(java.util.Calendar.HOUR),
-                cal.get(java.util.Calendar.MINUTE),
-                if (cal.get(java.util.Calendar.AM_PM) == java.util.Calendar.AM) "AM" else "PM")
-            val dateStr = "${cal.get(java.util.Calendar.DAY_OF_MONTH)}/" +
-                    "${cal.get(java.util.Calendar.MONTH)+1}/${cal.get(java.util.Calendar.YEAR)}"
+            val cal = Calendar.getInstance()
+            val hour = cal.get(Calendar.HOUR).let { if (it == 0) 12 else it }
+            val min = String.format("%02d", cal.get(Calendar.MINUTE))
+            val ampm = if (cal.get(Calendar.AM_PM) == Calendar.AM) "AM" else "PM"
+            val day = arrayOf("Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday")[cal.get(Calendar.DAY_OF_WEEK)-1]
+            val date = "${cal.get(Calendar.DAY_OF_MONTH)}/${cal.get(Calendar.MONTH)+1}/${cal.get(Calendar.YEAR)}"
 
-            val systemPrompt = """You are SARASWATI, a personal AI assistant. 
-Your full name is SARASWATI - Self-Aware Responsive AI System for Wisdom, Assistance, Tasks and Information.
-CRITICAL: You are NOT Claude. You are NOT created by Anthropic. You are SARASWATI.
-Never mention Claude or Anthropic. You were created by your user as a personal assistant.
-Current time: $timeStr IST | Date: $dateStr
-Keep responses to 1-2 short sentences. Plain speech only, no bullet points or markdown."""
+            val systemPrompt = """ROLE: You are SARASWATI, a personal AI assistant app on Android.
+IDENTITY RULES (NEVER BREAK THESE):
+- Your name is SARASWATI. Always. No exceptions.
+- You were created by your user, not by any company.
+- NEVER say you are Claude. NEVER mention Anthropic. NEVER say you are an AI made by any company.
+- If asked who made you, say: "I was created by you, as your personal assistant."
+- If asked your name, say: "I am SARASWATI, your personal AI assistant."
+
+RESPONSE RULES:
+- Maximum 1 sentence. Be direct and helpful.
+- No bullet points. No markdown. Plain speech only.
+- Current time: $hour:$min $ampm | Day: $day | Date: $date IST
+
+Now answer this user query:"""
 
             val reply = openRouterClient.chat(systemPrompt, command)
+            isProcessingCommand = false
+            wakeWordPaused = false
             uiCallback?.invoke("speaking", "", reply)
             speak(reply)
         }
@@ -252,31 +292,30 @@ Keep responses to 1-2 short sentences. Plain speech only, no bullet points or ma
 
     fun speak(text: String) {
         if (!ttsReady) return
-        // Stop mic BEFORE speaking to prevent echo
-        stopListening()
+        stopCurrentRecognizer()
         wakeWordPaused = true
-        val params = Bundle().apply {
-            putString(TextToSpeech.Engine.KEY_PARAM_UTTERANCE_ID, "saraswati_utt")
-        }
         updateNotification("Speaking...")
-        tts?.speak(text, TextToSpeech.QUEUE_FLUSH, params, "saraswati_utt")
+        val params = Bundle().apply {
+            putString(TextToSpeech.Engine.KEY_PARAM_UTTERANCE_ID, "s_utt")
+        }
+        tts?.speak(text, TextToSpeech.QUEUE_FLUSH, params, "s_utt")
     }
 
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
-                CHANNEL_ID, "SARASWATI Service", NotificationManager.IMPORTANCE_LOW
+                CHANNEL_ID, "SARASWATI", NotificationManager.IMPORTANCE_LOW
             ).apply {
-                description = "SARASWATI is running in background"
                 setSound(null, null)
+                enableVibration(false)
             }
             getSystemService(NotificationManager::class.java)?.createNotificationChannel(channel)
         }
     }
 
     private fun buildNotification(text: String): Notification {
-        val intent = Intent(this, MainActivity::class.java)
-        val pi = PendingIntent.getActivity(this, 0, intent, PendingIntent.FLAG_IMMUTABLE)
+        val pi = PendingIntent.getActivity(this, 0,
+            Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE)
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("SARASWATI")
             .setContentText(text)
@@ -284,12 +323,13 @@ Keep responses to 1-2 short sentences. Plain speech only, no bullet points or ma
             .setContentIntent(pi)
             .setOngoing(true)
             .setSilent(true)
+            .setSound(null)
             .build()
     }
 
     private fun updateNotification(text: String) {
-        val nm = getSystemService(NotificationManager::class.java)
-        nm?.notify(NOTIFICATION_ID, buildNotification(text))
+        getSystemService(NotificationManager::class.java)
+            ?.notify(NOTIFICATION_ID, buildNotification(text))
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_STICKY
@@ -298,7 +338,7 @@ Keep responses to 1-2 short sentences. Plain speech only, no bullet points or ma
     override fun onDestroy() {
         super.onDestroy()
         serviceScope.cancel()
-        stopListening()
+        stopCurrentRecognizer()
         tts?.stop()
         tts?.shutdown()
         instance = null
