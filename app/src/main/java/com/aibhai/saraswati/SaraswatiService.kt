@@ -26,6 +26,8 @@ class SaraswatiService : Service(), TextToSpeech.OnInitListener {
     private var wakeWordPaused = false
     private var ttsReady = false
     private var isProcessingCommand = false
+    private var lastCommandTime = 0L
+    private val COMMAND_COOLDOWN_MS = 3000L // min time between commands
 
     private val WAKE_WORDS = listOf("hey saraswati", "saraswati", "hi saraswati", "ok saraswati")
     private val EXIT_WORDS = listOf("stop", "exit", "goodbye", "go to sleep", "bye saraswati", "sleep")
@@ -150,16 +152,16 @@ class SaraswatiService : Service(), TextToSpeech.OnInitListener {
                     sessionActive = false
                     if (isSpeaking || isProcessingCommand || wakeWordPaused) return
 
-                    // Silently restart — no notification, no sound
                     val delay = when (error) {
-                        SpeechRecognizer.ERROR_NO_MATCH -> 300L
-                        SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> 300L
-                        SpeechRecognizer.ERROR_NETWORK -> 2000L
-                        9 -> { wakeWordPaused = true; return }
-                        else -> 500L
+                        SpeechRecognizer.ERROR_NO_MATCH -> 800L
+                        SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> 800L
+                        SpeechRecognizer.ERROR_NETWORK -> 3000L
+                        9 -> { wakeWordPaused = true; return } // not allowed
+                        else -> 1000L
                     }
                     Handler(Looper.getMainLooper()).postDelayed({
-                        if (!isSpeaking && !isProcessingCommand && !wakeWordPaused)
+                        // Only restart if nothing else is happening
+                        if (!isSpeaking && !isProcessingCommand && !wakeWordPaused && !sessionActive)
                             startContinuousListening()
                     }, delay)
                 }
@@ -225,6 +227,13 @@ class SaraswatiService : Service(), TextToSpeech.OnInitListener {
 
         // In conversation mode — process as command
         if (conversationMode) {
+            val now2 = System.currentTimeMillis()
+            if (now2 - lastCommandTime < COMMAND_COOLDOWN_MS) {
+                // Too soon — ignore duplicate
+                Handler(Looper.getMainLooper()).postDelayed({ startContinuousListening() }, 300)
+                return
+            }
+            lastCommandTime = now2
             isProcessingCommand = true
             wakeWordPaused = true
             uiCallback?.invoke("thinking", transcript, "")
