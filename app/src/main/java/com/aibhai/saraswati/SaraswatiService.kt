@@ -70,34 +70,32 @@ class SaraswatiService : Service(), TextToSpeech.OnInitListener {
                 }
                 override fun onDone(utteranceId: String?) {
                     isSpeaking = false
+                    sessionActive = false
                     Handler(Looper.getMainLooper()).postDelayed({
-                        // Resume listening only if we should be
-                        if (!wakeWordPaused && !isProcessingCommand) {
-                            Handler(Looper.getMainLooper()).post {
-                                uiCallback?.invoke("idle", "", "")
-                                updateNotification("Listening — Say \"Hey Saraswati\"")
-                            }
-                            startContinuousListening()
-                        }
-                    }, 1500) // 1.5s delay so speaker echo dies down
+                        uiCallback?.invoke("idle", "", "")
+                        wakeWordPaused = false
+                        isProcessingCommand = false
+                        updateNotification("Say \"Hey Saraswati\" to activate")
+                        startContinuousListening()
+                    }, 1500)
                 }
                 override fun onError(utteranceId: String?) {
                     isSpeaking = false
-                    if (!wakeWordPaused && !isProcessingCommand) startContinuousListening()
+                    sessionActive = false
+                    Handler(Looper.getMainLooper()).postDelayed({
+                        wakeWordPaused = false
+                        isProcessingCommand = false
+                        startContinuousListening()
+                    }, 500)
                 }
             })
 
+            // Start listening immediately — no greeting speech to avoid loop issues
             Handler(Looper.getMainLooper()).postDelayed({
-                speak("Namaste. I am SARASWATI, your personal AI assistant. Say Hey Saraswati anytime to activate me.")
-            }, 1000)
-
-            // Fallback: if TTS fails to trigger onDone, start listening after 5 seconds
-            Handler(Looper.getMainLooper()).postDelayed({
-                if (!isListening && !sessionActive && !isSpeaking) {
-                    wakeWordPaused = false
-                    startContinuousListening()
-                }
-            }, 5000)
+                wakeWordPaused = false
+                isSpeaking = false
+                startContinuousListening()
+            }, 1500)
         }
     }
 
@@ -303,13 +301,32 @@ Now answer this user query:"""
 
     fun speak(text: String) {
         if (!ttsReady) return
+        if (isSpeaking) {
+            tts?.stop() // stop any current speech first
+        }
         stopCurrentRecognizer()
+        isSpeaking = true
         wakeWordPaused = true
         updateNotification("Speaking...")
         val params = Bundle().apply {
             putString(TextToSpeech.Engine.KEY_PARAM_UTTERANCE_ID, "s_utt")
         }
         tts?.speak(text, TextToSpeech.QUEUE_FLUSH, params, "s_utt")
+
+        // Safety fallback: if onDone never fires (some Android phones),
+        // force-reset after estimated speech duration + 3 seconds
+        val estimatedDurationMs = (text.length * 60L) + 3000L
+        Handler(Looper.getMainLooper()).postDelayed({
+            if (isSpeaking) {
+                // onDone never fired — force reset
+                isSpeaking = false
+                sessionActive = false
+                wakeWordPaused = false
+                isProcessingCommand = false
+                uiCallback?.invoke("idle", "", "")
+                startContinuousListening()
+            }
+        }, estimatedDurationMs)
     }
 
     private fun createNotificationChannel() {
