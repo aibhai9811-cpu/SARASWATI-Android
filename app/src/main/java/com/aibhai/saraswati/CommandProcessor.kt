@@ -159,39 +159,60 @@ class CommandProcessor(private val context: Context) {
 
         return try {
             val number = lookupContact(name)
-            if (number != null) {
+
+            // Build WhatsApp URI
+            val whatsappPackages = listOf(
+                "com.whatsapp",
+                "com.whatsapp.w4b",
+                "com.gbwhatsapp",
+                "com.poor.WhatsApp"
+            )
+
+            // Find installed WhatsApp variant
+            val installedWhatsApp = whatsappPackages.firstOrNull { pkg ->
+                try {
+                    context.packageManager.getPackageInfo(pkg, 0)
+                    true
+                } catch (e: Exception) { false }
+            }
+
+            if (number != null && installedWhatsApp != null) {
+                // Send via WhatsApp with contact number
                 val cleanNumber = number.replace("[^0-9+]".toRegex(), "")
-                val encodedMsg = Uri.encode(message)
-                val uri = "https://api.whatsapp.com/send?phone=$cleanNumber" +
-                    if (message.isNotEmpty()) "&text=$encodedMsg" else ""
+                val fullNumber = if (cleanNumber.startsWith("+")) cleanNumber
+                                 else "+91$cleanNumber" // add India code if missing
+                val encodedMsg = if (message.isNotEmpty()) Uri.encode(message) else ""
+                val uri = "https://wa.me/$fullNumber" +
+                    if (encodedMsg.isNotEmpty()) "?text=$encodedMsg" else ""
                 context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(uri)).apply {
                     flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                    setPackage(installedWhatsApp)
                 })
-                if (message.isNotEmpty()) "Opening WhatsApp to send \"$message\" to $name."
+                if (message.isNotEmpty()) "Sending WhatsApp message to $name: $message"
                 else "Opening WhatsApp chat with $name."
+
+            } else if (installedWhatsApp != null) {
+                // Open WhatsApp directly — contact not found in contacts
+                val intent = context.packageManager.getLaunchIntentForPackage(installedWhatsApp)!!
+                intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                context.startActivity(intent)
+                if (name.isNotEmpty()) "Opening WhatsApp. Please find $name manually."
+                else "Opening WhatsApp."
+
             } else {
-                // Try WhatsApp directly
-                val intent = context.packageManager.getLaunchIntentForPackage("com.whatsapp")
-                    ?: context.packageManager.getLaunchIntentForPackage("com.whatsapp.w4b")
-                if (intent != null) {
-                    intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
-                    context.startActivity(intent)
-                    "Opening WhatsApp. Contact $name not found in contacts."
-                } else {
-                    "WhatsApp is not installed on this device."
+                // WhatsApp not found — try browser fallback
+                try {
+                    val uri = "https://wa.me/" + (number?.replace("[^0-9+]".toRegex(), "") ?: "")
+                    context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(uri)).apply {
+                        flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                    })
+                    "Opening WhatsApp in browser."
+                } catch (e: Exception) {
+                    "WhatsApp is not installed. Please install it from Play Store."
                 }
             }
         } catch (e: Exception) {
-            // Last resort — open WhatsApp via store or direct
-            try {
-                context.startActivity(Intent(Intent.ACTION_VIEW,
-                    Uri.parse("market://details?id=com.whatsapp")).apply {
-                    flags = Intent.FLAG_ACTIVITY_NEW_TASK
-                })
-                "Please install WhatsApp first."
-            } catch (e2: Exception) {
-                "Could not open WhatsApp."
-            }
+            "Sorry, I could not open WhatsApp."
         }
     }
 
