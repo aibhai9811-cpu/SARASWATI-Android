@@ -178,8 +178,9 @@ class SaraswatiService : Service(), TextToSpeech.OnInitListener {
                 putExtra(RecognizerIntent.EXTRA_LANGUAGE, "en-IN")
                 putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
                 putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false)
-                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 1500L)
-                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 300L)
+                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 8000L)
+                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 5000L)
+                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 1000L)
             }
             try {
                 recognizer?.startListening(intent)
@@ -341,10 +342,13 @@ Now answer this user query:"""
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
-                CHANNEL_ID, "SARASWATI", NotificationManager.IMPORTANCE_LOW
+                CHANNEL_ID, "SARASWATI", NotificationManager.IMPORTANCE_MIN
             ).apply {
                 setSound(null, null)
                 enableVibration(false)
+                enableLights(false)
+                setShowBadge(false)
+                lockscreenVisibility = Notification.VISIBILITY_SECRET
             }
             getSystemService(NotificationManager::class.java)?.createNotificationChannel(channel)
         }
@@ -361,6 +365,8 @@ Now answer this user query:"""
             .setOngoing(true)
             .setSilent(true)
             .setSound(null)
+            .setPriority(NotificationCompat.PRIORITY_MIN)
+            .setVisibility(NotificationCompat.VISIBILITY_SECRET)
             .build()
     }
 
