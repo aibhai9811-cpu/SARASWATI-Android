@@ -10,49 +10,64 @@ import java.util.*
 
 class CommandProcessor(private val context: Context) {
 
+    // Find installed WhatsApp variant once
+    private fun getWhatsAppPackage(): String? {
+        val packages = listOf(
+            "com.whatsapp",
+            "com.whatsapp.w4b",
+            "com.gbwhatsapp",
+            "com.poorfish.whatsapp",
+            "com.whatsapp.plus"
+        )
+        return packages.firstOrNull { pkg ->
+            try { context.packageManager.getPackageInfo(pkg, 0); true }
+            catch (e: Exception) { false }
+        }
+    }
+
     fun tryHandleLocally(command: String): String? {
         val cmd = command.lowercase().trim()
 
         return when {
 
-            // ── WHATSAPP (check before "open" so it catches "open whatsapp and text...") ──
+            // ── WHATSAPP ──
             cmd.contains("whatsapp") -> handleWhatsApp(cmd)
 
             // ── CALLS ──
-            cmd.contains("call") && (cmd.contains("mom") || cmd.contains("mum") ||
-                cmd.contains("mummy") || cmd.contains("dad") || cmd.contains("papa") ||
-                cmd.startsWith("call ") || cmd.contains(" call ")) -> {
-                val name = cmd.replace("make a call to","").replace("call","").trim()
+            cmd.contains("call") -> {
+                val name = cmd
+                    .replace("make a call to", "").replace("call to", "")
+                    .replace("call", "").trim()
                 handleCall(name)
             }
 
-            // ── OPEN APP ──
-            cmd.startsWith("open ") && !cmd.contains("whatsapp") ->
-                handleOpenApp(cmd.removePrefix("open ").trim())
+            // ── OPEN APPS ──
+            cmd.startsWith("open ") -> handleOpenApp(cmd.removePrefix("open ").trim())
 
             // ── SEARCH ──
-            cmd.startsWith("search ") || cmd.startsWith("google ") ||
-                cmd.startsWith("search for ") || cmd.contains("search on google") ->
+            cmd.startsWith("search") || cmd.startsWith("google") ->
                 handleSearch(cmd)
 
+            // ── YOUTUBE directly ──
+            cmd.contains("youtube") -> {
+                openUrl("https://www.youtube.com")
+                "Opening YouTube."
+            }
+
             // ── ALARM ──
-            cmd.contains("set alarm") || cmd.contains("alarm for") ||
-                cmd.contains("wake me") || cmd.contains("alarm at") ->
-                handleAlarm(cmd)
+            cmd.contains("alarm") || cmd.contains("wake me") -> handleAlarm(cmd)
 
             // ── TIME ──
-            cmd.contains("what time") || cmd.contains("current time") ||
-                cmd == "time" || cmd.contains("kitna baja") -> {
+            cmd.contains("time") || cmd.contains("kitna baja") -> {
                 val now = Calendar.getInstance()
-                val hour = now.get(Calendar.HOUR).let { if (it == 0) 12 else it }
-                val min = String.format("%02d", now.get(Calendar.MINUTE))
-                val ampm = if (now.get(Calendar.AM_PM) == Calendar.AM) "AM" else "PM"
-                "The current time is $hour:$min $ampm."
+                val h = now.get(Calendar.HOUR).let { if (it == 0) 12 else it }
+                val m = String.format("%02d", now.get(Calendar.MINUTE))
+                val ap = if (now.get(Calendar.AM_PM) == Calendar.AM) "AM" else "PM"
+                "The current time is $h:$m $ap."
             }
 
             // ── DATE ──
-            cmd.contains("what date") || cmd.contains("today") && cmd.contains("date") ||
-                cmd.contains("what day") -> {
+            cmd.contains("date") || cmd.contains("day") && cmd.contains("today") -> {
                 val now = Calendar.getInstance()
                 val days = arrayOf("Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday")
                 val months = arrayOf("January","February","March","April","May","June",
@@ -61,35 +76,62 @@ class CommandProcessor(private val context: Context) {
                     "${now.get(Calendar.DAY_OF_MONTH)} ${months[now.get(Calendar.MONTH)]}."
             }
 
-            // ── FLASHLIGHT ──
-            cmd.contains("flashlight on") || cmd.contains("torch on") -> {
-                toggleFlashlight(true); "Flashlight on."
+            // ── FLASHLIGHT — direct hardware control ──
+            cmd.contains("flashlight") || cmd.contains("torch") -> {
+                val turnOn = cmd.contains("on") || (!cmd.contains("off") && !cmd.contains("band"))
+                toggleFlashlight(turnOn)
+                if (turnOn) "Flashlight on." else "Flashlight off."
             }
-            cmd.contains("flashlight off") || cmd.contains("torch off") -> {
-                toggleFlashlight(false); "Flashlight off."
+
+            // ── SCREENSHOT ──
+            cmd.contains("screenshot") -> {
+                "To take a screenshot, press Power + Volume Down at the same time."
             }
 
             // ── SETTINGS ──
-            cmd.contains("open settings") || cmd.contains("open setting") -> {
+            cmd.contains("setting") -> {
                 context.startActivity(Intent(Settings.ACTION_SETTINGS).apply {
                     flags = Intent.FLAG_ACTIVITY_NEW_TASK })
                 "Opening settings."
             }
 
             // ── WIFI ──
-            cmd.contains("wifi") && (cmd.contains("setting") || cmd.contains("on") || cmd.contains("off")) -> {
+            cmd.contains("wifi") -> {
                 context.startActivity(Intent(Settings.ACTION_WIFI_SETTINGS).apply {
                     flags = Intent.FLAG_ACTIVITY_NEW_TASK })
                 "Opening WiFi settings."
             }
 
-            // Not handled locally — send to AI
+            // ── BLUETOOTH ──
+            cmd.contains("bluetooth") -> {
+                context.startActivity(Intent(Settings.ACTION_BLUETOOTH_SETTINGS).apply {
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK })
+                "Opening Bluetooth settings."
+            }
+
+            // ── BROWSER / CHROME ──
+            cmd.contains("browser") || cmd.contains("chrome") -> {
+                openUrl("https://www.google.com")
+                "Opening browser."
+            }
+
             else -> null
         }
     }
 
     private fun handleCall(nameOrNumber: String): String {
-        val cleaned = nameOrNumber.replace("to","").replace("and","").trim()
+        val cleaned = nameOrNumber
+            .replace("and put the call on speaker","")
+            .replace("on speaker","")
+            .replace("speaker","")
+            .trim()
+
+        if (cleaned.isEmpty()) {
+            context.startActivity(Intent(Intent.ACTION_DIAL).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK })
+            return "Opening dialer."
+        }
+
         val number = if (cleaned.all { it.isDigit() || it == '+' || it == '-' || it == ' ' }) {
             cleaned.replace(" ","")
         } else {
@@ -99,210 +141,178 @@ class CommandProcessor(private val context: Context) {
         return if (number != null) {
             try {
                 context.startActivity(Intent(Intent.ACTION_CALL, Uri.parse("tel:$number")).apply {
-                    flags = Intent.FLAG_ACTIVITY_NEW_TASK
-                })
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK })
                 "Calling $cleaned now."
             } catch (e: Exception) {
                 context.startActivity(Intent(Intent.ACTION_DIAL, Uri.parse("tel:$number")).apply {
-                    flags = Intent.FLAG_ACTIVITY_NEW_TASK
-                })
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK })
                 "Opening dialer for $cleaned."
             }
         } else {
-            // Try to dial anyway with contact name
+            // Contact not found — open dialer so user can dial manually
             context.startActivity(Intent(Intent.ACTION_DIAL).apply {
-                flags = Intent.FLAG_ACTIVITY_NEW_TASK
-            })
-            "Contact not found. Opening dialer."
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK })
+            "Contact $cleaned not found. Opening dialer."
         }
     }
 
     private fun handleWhatsApp(cmd: String): String {
-        // Parse: "whatsapp mummy to hai i am there" or "open whatsapp and text mummy to hai"
+        val whatsappPkg = getWhatsAppPackage()
+
+        // Parse name and message from command
+        val cleaned = cmd
+            .replace("open whatsapp and text","").replace("open whatsapp and send","")
+            .replace("whatsapp message to","").replace("whatsapp text to","")
+            .replace("send whatsapp to","").replace("send whatsapp","")
+            .replace("open whatsapp","").replace("whatsapp to","").replace("whatsapp","")
+            .trim()
+
         var name = ""
         var message = ""
 
-        // Remove command prefixes
-        val cleaned = cmd
-            .replace("open whatsapp and text", "")
-            .replace("open whatsapp and send", "")
-            .replace("open whatsapp", "")
-            .replace("send whatsapp to", "")
-            .replace("send whatsapp", "")
-            .replace("whatsapp message to", "")
-            .replace("whatsapp text to", "")
-            .replace("whatsapp to", "")
-            .replace("whatsapp", "")
-            .trim()
-
-        // Find message separator — "to" keyword separates name from message
-        // e.g. "mummy to hai i am there" → name=mummy, message=hai i am there
-        val toIndex = cleaned.indexOf(" to ")
-        if (toIndex > 0) {
-            name = cleaned.substring(0, toIndex).trim()
-            message = cleaned.substring(toIndex + 4).trim()
+        // "mummy hello i am fine" or "mummy to hello i am fine"
+        val toIdx = cleaned.indexOf(" to ")
+        if (toIdx > 0) {
+            name = cleaned.substring(0, toIdx).trim()
+            message = cleaned.substring(toIdx + 4).trim()
         } else {
-            name = cleaned.trim()
-        }
-
-        // Normalize common names
-        name = name.replace("mummy","").replace("mum","").replace("mom","")
-            .replace("dad","").replace("papa","").trim().let {
-            if (it.isEmpty()) {
-                when {
-                    cmd.contains("mummy") || cmd.contains("mum") || cmd.contains("mom") -> "mom"
-                    cmd.contains("dad") || cmd.contains("papa") -> "dad"
-                    else -> cleaned.split(" ").firstOrNull() ?: ""
-                }
-            } else it
-        }
-
-        return try {
-            val number = lookupContact(name)
-
-            // Build WhatsApp URI
-            val whatsappPackages = listOf(
-                "com.whatsapp",
-                "com.whatsapp.w4b",
-                "com.gbwhatsapp",
-                "com.poor.WhatsApp"
-            )
-
-            // Find installed WhatsApp variant
-            val installedWhatsApp = whatsappPackages.firstOrNull { pkg ->
-                try {
-                    context.packageManager.getPackageInfo(pkg, 0)
-                    true
-                } catch (e: Exception) { false }
+            // Try splitting on first space — first word is name, rest is message
+            val spaceIdx = cleaned.indexOf(' ')
+            if (spaceIdx > 0 && cleaned.length > spaceIdx + 1) {
+                name = cleaned.substring(0, spaceIdx).trim()
+                message = cleaned.substring(spaceIdx + 1).trim()
+            } else {
+                name = cleaned
             }
+        }
 
-            if (number != null && installedWhatsApp != null) {
-                // Send via WhatsApp with contact number
-                val cleanNumber = number.replace("[^0-9+]".toRegex(), "")
-                val fullNumber = if (cleanNumber.startsWith("+")) cleanNumber
-                                 else "+91$cleanNumber" // add India code if missing
-                val encodedMsg = if (message.isNotEmpty()) Uri.encode(message) else ""
-                val uri = "https://wa.me/$fullNumber" +
-                    if (encodedMsg.isNotEmpty()) "?text=$encodedMsg" else ""
-                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(uri)).apply {
-                    flags = Intent.FLAG_ACTIVITY_NEW_TASK
-                    setPackage(installedWhatsApp)
-                })
-                if (message.isNotEmpty()) "Sending WhatsApp message to $name: $message"
-                else "Opening WhatsApp chat with $name."
+        // Handle family names
+        val contactName = when {
+            name.contains("mummy") || name.contains("mum") || name.contains("mom") || name == "mother" -> "mom"
+            name.contains("dad") || name.contains("papa") || name.contains("father") -> "dad"
+            name.contains("bhai") || name.contains("brother") -> "brother"
+            name.contains("didi") || name.contains("sister") -> "sister"
+            else -> name
+        }
 
-            } else if (installedWhatsApp != null) {
-                // Open WhatsApp directly — contact not found in contacts
-                val intent = context.packageManager.getLaunchIntentForPackage(installedWhatsApp)!!
-                intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
-                context.startActivity(intent)
+        val number = lookupContact(contactName)
+            ?: lookupContact(name) // try original name too
+
+        return if (whatsappPkg != null) {
+            if (number != null) {
+                // Direct WhatsApp message with number
+                val cleanNum = number.replace("[^0-9]".toRegex(), "")
+                val numWithCode = if (cleanNum.startsWith("91") && cleanNum.length == 12) cleanNum
+                                  else if (cleanNum.length == 10) "91$cleanNum"
+                                  else cleanNum
+                try {
+                    val intent = Intent(Intent.ACTION_VIEW).apply {
+                        data = Uri.parse("https://wa.me/$numWithCode" +
+                            if (message.isNotEmpty()) "?text=${Uri.encode(message)}" else "")
+                        setPackage(whatsappPkg) // ← KEY: force open in WhatsApp app not browser
+                        flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                    }
+                    context.startActivity(intent)
+                    if (message.isNotEmpty()) "Opening WhatsApp to send message to $name."
+                    else "Opening WhatsApp chat with $name."
+                } catch (e: Exception) {
+                    // Fallback: open WhatsApp directly
+                    openApp(whatsappPkg)
+                    "Opening WhatsApp."
+                }
+            } else {
+                // No number found — just open WhatsApp
+                openApp(whatsappPkg)
                 if (name.isNotEmpty()) "Opening WhatsApp. Please find $name manually."
                 else "Opening WhatsApp."
-
-            } else {
-                // WhatsApp not found — try browser fallback
-                try {
-                    val uri = "https://wa.me/" + (number?.replace("[^0-9+]".toRegex(), "") ?: "")
-                    context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(uri)).apply {
-                        flags = Intent.FLAG_ACTIVITY_NEW_TASK
-                    })
-                    "Opening WhatsApp in browser."
-                } catch (e: Exception) {
-                    "WhatsApp is not installed. Please install it from Play Store."
-                }
             }
-        } catch (e: Exception) {
-            "Sorry, I could not open WhatsApp."
+        } else {
+            "WhatsApp is not installed on this device. Please install it from Play Store."
         }
     }
 
     private fun handleOpenApp(appName: String): String {
         val name = appName.lowercase().trim()
+
+        // Common app package map — includes Vivo-specific packages
         val packageMap = mapOf(
-            "chrome" to "com.android.chrome",
-            "google" to "com.google.android.googlequicksearchbox",
-            "youtube" to "com.google.android.youtube",
-            "whatsapp" to "com.whatsapp",
-            "instagram" to "com.instagram.android",
-            "facebook" to "com.facebook.katana",
-            "twitter" to "com.twitter.android",
-            "x" to "com.twitter.android",
-            "gmail" to "com.google.android.gm",
-            "maps" to "com.google.android.apps.maps",
-            "google maps" to "com.google.android.apps.maps",
-            "camera" to "com.android.camera",
-            "calculator" to "com.android.calculator2",
-            "clock" to "com.android.deskclock",
-            "spotify" to "com.spotify.music",
-            "telegram" to "org.telegram.messenger",
-            "netflix" to "com.netflix.mediaclient",
-            "settings" to "com.android.settings",
-            "play store" to "com.android.vending",
-            "contacts" to "com.android.contacts",
-            "messages" to "com.google.android.apps.messaging",
-            "paytm" to "net.one97.paytm",
-            "phonepe" to "com.phonepe.app",
-            "gpay" to "com.google.android.apps.nbu.paisa.user",
-            "google pay" to "com.google.android.apps.nbu.paisa.user",
-            "photos" to "com.google.android.apps.photos",
-            "files" to "com.google.android.apps.nbu.files",
-            "amazon" to "in.amazon.mShop.android.shopping",
-            "flipkart" to "com.flipkart.android",
-            "zomato" to "com.application.zomato",
-            "swiggy" to "in.swiggy.android",
-            "ola" to "com.olacabs.customer",
-            "uber" to "com.ubercab"
+            "youtube" to listOf("com.google.android.youtube","com.vanced.android.youtube"),
+            "whatsapp" to listOf("com.whatsapp","com.whatsapp.w4b"),
+            "chrome" to listOf("com.android.chrome","com.chrome.beta"),
+            "google" to listOf("com.google.android.googlequicksearchbox","com.google.android.gm"),
+            "instagram" to listOf("com.instagram.android"),
+            "facebook" to listOf("com.facebook.katana","com.facebook.lite"),
+            "twitter" to listOf("com.twitter.android","com.twitter.android.lite"),
+            "gmail" to listOf("com.google.android.gm"),
+            "maps" to listOf("com.google.android.apps.maps"),
+            "camera" to listOf("com.vivo.camera","com.android.camera","com.mediatek.camera"),
+            "calculator" to listOf("com.android.calculator2","com.vivo.calculator"),
+            "clock" to listOf("com.android.deskclock","com.vivo.alarmclock"),
+            "spotify" to listOf("com.spotify.music"),
+            "telegram" to listOf("org.telegram.messenger","org.telegram.messenger.web"),
+            "netflix" to listOf("com.netflix.mediaclient"),
+            "settings" to listOf("com.android.settings","com.vivo.settings"),
+            "play store" to listOf("com.android.vending"),
+            "contacts" to listOf("com.android.contacts","com.vivo.contacts"),
+            "messages" to listOf("com.google.android.apps.messaging","com.vivo.message"),
+            "paytm" to listOf("net.one97.paytm"),
+            "phonepe" to listOf("com.phonepe.app"),
+            "gpay" to listOf("com.google.android.apps.nbu.paisa.user"),
+            "photos" to listOf("com.google.android.apps.photos"),
+            "files" to listOf("com.google.android.apps.nbu.files","com.vivo.filemanager"),
+            "amazon" to listOf("in.amazon.mShop.android.shopping"),
+            "flipkart" to listOf("com.flipkart.android"),
+            "zomato" to listOf("com.application.zomato"),
+            "swiggy" to listOf("in.swiggy.android"),
+            "hotstar" to listOf("in.startv.hotstar"),
+            "mx player" to listOf("com.mxtech.videoplayer.ad","com.mxtech.videoplayer.pro"),
+            "jio" to listOf("com.jio.web","com.jio.myjio"),
+            "phone" to listOf("com.android.dialer","com.vivo.dialer"),
+            "dialer" to listOf("com.android.dialer","com.vivo.dialer"),
+            "gallery" to listOf("com.vivo.gallery","com.android.gallery3d"),
+            "music" to listOf("com.vivo.music","com.android.music","com.spotify.music")
         )
 
-        val pkg = packageMap[name]
-            ?: packageMap.entries.firstOrNull { name.contains(it.key) }?.value
-            ?: findAppByName(name)
+        // Find by keyword match
+        val matchedKey = packageMap.keys.firstOrNull { name.contains(it) }
+        val packages = matchedKey?.let { packageMap[it] } ?: emptyList()
 
-        return if (pkg != null) {
-            val intent = context.packageManager.getLaunchIntentForPackage(pkg)
-            if (intent != null) {
-                intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
-                context.startActivity(intent)
-                "Opening $appName."
-            } else {
-                "App not found on this device."
-            }
-        } else {
-            "I couldn't find $appName on your device."
+        // Try each package in order
+        for (pkg in packages) {
+            val result = openApp(pkg)
+            if (result != null) return result
         }
-    }
 
-    private fun findAppByName(query: String): String? {
-        val pm = context.packageManager
+        // Fuzzy search all installed apps
         return try {
-            pm.getInstalledApplications(PackageManager.GET_META_DATA)
-                .firstOrNull { pm.getApplicationLabel(it).toString().lowercase().contains(query) }
-                ?.packageName
-        } catch (e: Exception) { null }
+            val pm = context.packageManager
+            val installed = pm.getInstalledApplications(PackageManager.GET_META_DATA)
+            val match = installed.firstOrNull {
+                pm.getApplicationLabel(it).toString().lowercase().contains(name)
+            }
+            if (match != null) {
+                openApp(match.packageName) ?: "Could not open $appName."
+            } else {
+                // Last resort: open Play Store search
+                openUrl("https://play.google.com/store/search?q=$name")
+                "$appName not found. Searching Play Store."
+            }
+        } catch (e: Exception) {
+            "Could not find $appName on this device."
+        }
     }
 
     private fun handleSearch(cmd: String): String {
         val query = cmd
-            .replace("search for", "").replace("search on google", "")
-            .replace("search", "").replace("google", "").trim()
-        return try {
-            context.startActivity(Intent(Intent.ACTION_WEB_SEARCH).apply {
-                putExtra("query", query)
-                flags = Intent.FLAG_ACTIVITY_NEW_TASK
-            })
-            "Searching for $query."
-        } catch (e: Exception) {
-            context.startActivity(Intent(Intent.ACTION_VIEW,
-                Uri.parse("https://www.google.com/search?q=${Uri.encode(query)}")).apply {
-                flags = Intent.FLAG_ACTIVITY_NEW_TASK
-            })
-            "Searching for $query."
-        }
+            .replace("search for","").replace("search on google","")
+            .replace("search","").replace("google","").trim()
+        openUrl("https://www.google.com/search?q=${Uri.encode(query)}")
+        return "Searching for $query."
     }
 
     private fun handleAlarm(cmd: String): String {
-        val timeRegex = Regex("""(\d{1,2})(?::(\d{2}))?\s*(am|pm|बजे)?""", RegexOption.IGNORE_CASE)
-        val match = timeRegex.find(cmd) ?: return "Please say the time. For example: Set alarm for 7 AM."
+        val timeRegex = Regex("""(\d{1,2})(?::(\d{2}))?\s*(am|pm|baje|baj)?""", RegexOption.IGNORE_CASE)
+        val match = timeRegex.find(cmd) ?: return "Please say the alarm time. For example: Set alarm for 7 AM."
 
         var hour = match.groupValues[1].toInt()
         val min = match.groupValues[2].takeIf { it.isNotEmpty() }?.toInt() ?: 0
@@ -318,11 +328,33 @@ class CommandProcessor(private val context: Context) {
                 putExtra(AlarmClock.EXTRA_SKIP_UI, false)
                 flags = Intent.FLAG_ACTIVITY_NEW_TASK
             })
-            val h = if (hour > 12) hour - 12 else if (hour == 0) 12 else hour
-            "Alarm set for $h:${String.format("%02d", min)} ${if (hour >= 12) "PM" else "AM"}."
-        } catch (e: Exception) {
-            "Could not set alarm. Please try manually."
-        }
+            val h = if (hour > 12) hour-12 else if (hour == 0) 12 else hour
+            "Alarm set for $h:${String.format("%02d",min)} ${if(hour>=12)"PM" else "AM"}."
+        } catch (e: Exception) { "Could not set alarm. Please try manually." }
+    }
+
+    // ── HELPERS ──
+
+    private fun openApp(packageName: String): String? {
+        return try {
+            val intent = context.packageManager.getLaunchIntentForPackage(packageName)
+                ?: return null
+            intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
+            context.startActivity(intent)
+            val label = try {
+                context.packageManager.getApplicationLabel(
+                    context.packageManager.getApplicationInfo(packageName, 0)).toString()
+            } catch (e: Exception) { packageName }
+            "Opening $label."
+        } catch (e: Exception) { null }
+    }
+
+    private fun openUrl(url: String) {
+        try {
+            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK
+            })
+        } catch (e: Exception) { }
     }
 
     private fun lookupContact(name: String): String? {
@@ -333,8 +365,7 @@ class CommandProcessor(private val context: Context) {
                 arrayOf(ContactsContract.CommonDataKinds.Phone.NUMBER,
                     ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME),
                 "${ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME} LIKE ?",
-                arrayOf("%$name%"), null
-            )
+                arrayOf("%$name%"), null)
             cursor?.use { if (it.moveToFirst()) it.getString(0) else null }
         } catch (e: Exception) { null }
     }
