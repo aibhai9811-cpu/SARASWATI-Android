@@ -27,28 +27,26 @@ class SaraswatiService : Service(), TextToSpeech.OnInitListener {
     private var ttsReady = false
     private var isProcessingCommand = false
     private var lastCommandTime = 0L
-    private val COMMAND_COOLDOWN_MS = 3000L // min time between commands
+    private val COMMAND_COOLDOWN = 2500L
+    private var lastTranscript = ""
+    private var lastTranscriptTime = 0L
+    private val DUPLICATE_GUARD = 3000L
 
-    private val WAKE_WORDS = listOf("hey saraswati", "saraswati", "hi saraswati", "ok saraswati")
-    private val EXIT_WORDS = listOf("stop", "exit", "goodbye", "go to sleep", "bye saraswati", "sleep")
+    // Controls mic restart — we restart ONCE after each cycle, not in a loop
+    private var restartPending = false
+
+    private val WAKE_WORDS = listOf("hey saraswati", "saraswati", "hi saraswati", "ok saraswati", "hello saraswati")
+    private val EXIT_WORDS = listOf("stop", "exit", "goodbye", "go to sleep", "bye", "band karo", "ruko")
 
     private val serviceScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     private lateinit var commandProcessor: CommandProcessor
     private lateinit var openRouterClient: OpenRouterClient
 
-    private var lastTranscript = ""
-    private var lastTranscriptTime = 0L
-    private val DUPLICATE_GUARD_MS = 3000L
-
-    // ── Single persistent recognizer session ──
-    // Instead of restarting every few seconds, we keep ONE session open continuously
-    private var sessionActive = false
-
     override fun onCreate() {
         super.onCreate()
         instance = this
         createNotificationChannel()
-        startForeground(NOTIFICATION_ID, buildNotification("SARASWATI — Initializing..."))
+        startForeground(NOTIFICATION_ID, buildNotification("SARASWATI — Starting..."))
         tts = TextToSpeech(this, this)
         commandProcessor = CommandProcessor(this)
         openRouterClient = OpenRouterClient(this)
@@ -56,195 +54,174 @@ class SaraswatiService : Service(), TextToSpeech.OnInitListener {
 
     override fun onInit(status: Int) {
         if (status == TextToSpeech.SUCCESS) {
-            tts?.language = Locale("en", "IN")
-            tts?.setSpeechRate(0.92f)
-            tts?.setPitch(0.85f)
+            // Prefer Hindi-capable engine with Indian English voice
+            tts?.language = Locale("hi", "IN").let { hi ->
+                if (tts?.isLanguageAvailable(hi) == TextToSpeech.LANG_AVAILABLE) hi
+                else Locale("en", "IN")
+            }
+            tts?.setSpeechRate(0.88f)
+            tts?.setPitch(0.9f)
             ttsReady = true
 
             tts?.setOnUtteranceProgressListener(object : android.speech.tts.UtteranceProgressListener() {
                 override fun onStart(utteranceId: String?) {
                     isSpeaking = true
-                    stopCurrentRecognizer() // stop mic while speaking
-                    Handler(Looper.getMainLooper()).post {
-                        uiCallback?.invoke("speaking", "", "")
-                        updateNotification("Speaking...")
-                    }
+                    destroyRecognizer()
                 }
                 override fun onDone(utteranceId: String?) {
                     isSpeaking = false
-                    sessionActive = false
                     Handler(Looper.getMainLooper()).postDelayed({
-                        uiCallback?.invoke("idle", "", "")
-                        wakeWordPaused = false
-                        isProcessingCommand = false
-                        updateNotification("Say \"Hey Saraswati\" to activate")
-                        startContinuousListening()
-                    }, 1500)
+                        if (!wakeWordPaused && !isProcessingCommand) {
+                            uiCallback?.invoke("idle", "", "")
+                            scheduleListenRestart(1000)
+                        }
+                    }, 800)
                 }
                 override fun onError(utteranceId: String?) {
                     isSpeaking = false
-                    sessionActive = false
                     Handler(Looper.getMainLooper()).postDelayed({
-                        wakeWordPaused = false
-                        isProcessingCommand = false
-                        startContinuousListening()
+                        if (!wakeWordPaused && !isProcessingCommand)
+                            scheduleListenRestart(500)
                     }, 500)
                 }
             })
 
-            // Start listening immediately — no greeting speech to avoid loop issues
+            // Start listening after 2 seconds
             Handler(Looper.getMainLooper()).postDelayed({
-                wakeWordPaused = false
-                isSpeaking = false
-                startContinuousListening()
-            }, 1500)
+                updateNotification("Say \"Hey Saraswati\" to activate")
+                uiCallback?.invoke("idle", "", "")
+                scheduleListenRestart(0)
+            }, 2000)
         }
     }
 
-    // ── CONTINUOUS LISTENING — one long session, no repeated restarts ──
-    private fun startContinuousListening() {
-        if (isSpeaking || isProcessingCommand || wakeWordPaused || sessionActive) return
+    // ── SCHEDULE A SINGLE RESTART — never overlapping ──
+    private fun scheduleListenRestart(delayMs: Long) {
+        if (restartPending || isSpeaking || isProcessingCommand || wakeWordPaused) return
+        restartPending = true
+        Handler(Looper.getMainLooper()).postDelayed({
+            restartPending = false
+            if (!isSpeaking && !isProcessingCommand && !wakeWordPaused && !isListening)
+                startListeningSession()
+        }, delayMs)
+    }
 
-        Handler(Looper.getMainLooper()).post {
-            if (isSpeaking || isProcessingCommand || sessionActive) return@post
+    private fun startListeningSession() {
+        if (isSpeaking || isProcessingCommand || wakeWordPaused || isListening) return
 
-            stopCurrentRecognizer()
-            sessionActive = true
-            isListening = true
-            uiCallback?.invoke("idle", "", "")
+        destroyRecognizer()
+        recognizer = SpeechRecognizer.createSpeechRecognizer(this)
+        recognizer?.setRecognitionListener(object : RecognitionListener {
 
-            recognizer = SpeechRecognizer.createSpeechRecognizer(this)
-            recognizer?.setRecognitionListener(object : RecognitionListener {
-
-                override fun onReadyForSpeech(params: Bundle?) {
-                    // Update UI to show we're ready but don't make noise
-                    Handler(Looper.getMainLooper()).post {
-                        uiCallback?.invoke("idle", "", "")
-                        updateNotification("Listening — Say \"Hey Saraswati\"")
-                    }
-                }
-
-                override fun onBeginningOfSpeech() {
-                    if (!isSpeaking) uiCallback?.invoke("listening", "", "")
-                }
-
-                override fun onResults(results: Bundle?) {
-                    isListening = false
-                    sessionActive = false
-                    if (isSpeaking || isProcessingCommand) return
-
-                    val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                    val transcript = matches?.firstOrNull()?.lowercase()?.trim() ?: run {
-                        // No speech detected — silently restart
-                        if (!wakeWordPaused && !isSpeaking) {
-                            Handler(Looper.getMainLooper()).postDelayed({
-                                startContinuousListening()
-                            }, 200)
-                        }
-                        return
-                    }
-
-                    handleTranscript(transcript)
-                }
-
-                override fun onError(error: Int) {
-                    isListening = false
-                    sessionActive = false
-                    if (isSpeaking || isProcessingCommand || wakeWordPaused) return
-
-                    val delay = when (error) {
-                        SpeechRecognizer.ERROR_NO_MATCH -> 800L
-                        SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> 800L
-                        SpeechRecognizer.ERROR_NETWORK -> 3000L
-                        9 -> { wakeWordPaused = true; return } // not allowed
-                        else -> 1000L
-                    }
-                    Handler(Looper.getMainLooper()).postDelayed({
-                        // Only restart if nothing else is happening
-                        if (!isSpeaking && !isProcessingCommand && !wakeWordPaused && !sessionActive)
-                            startContinuousListening()
-                    }, delay)
-                }
-
-                override fun onEndOfSpeech() {}
-                override fun onBufferReceived(buffer: ByteArray?) {}
-                override fun onPartialResults(partialResults: Bundle?) {}
-                override fun onEvent(eventType: Int, params: Bundle?) {}
-                override fun onRmsChanged(rmsdB: Float) {}
-            })
-
-            val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-                putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-                putExtra(RecognizerIntent.EXTRA_LANGUAGE, "en-IN")
-                putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
-                putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false)
-                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 8000L)
-                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 5000L)
-                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 1000L)
+            override fun onReadyForSpeech(params: Bundle?) {
+                isListening = true
+                updateNotification("Listening...")
             }
-            try {
-                recognizer?.startListening(intent)
-            } catch (e: Exception) {
-                sessionActive = false
+
+            override fun onBeginningOfSpeech() {
+                uiCallback?.invoke("listening", "", "")
+            }
+
+            override fun onResults(results: Bundle?) {
                 isListening = false
+                val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                val transcript = matches?.firstOrNull()?.trim() ?: run {
+                    scheduleListenRestart(300)
+                    return
+                }
+                if (transcript.isNotBlank()) handleTranscript(transcript)
+                else scheduleListenRestart(300)
             }
+
+            override fun onError(error: Int) {
+                isListening = false
+                if (isSpeaking || isProcessingCommand || wakeWordPaused) return
+                val delay = when (error) {
+                    SpeechRecognizer.ERROR_NO_MATCH,
+                    SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> 500L
+                    SpeechRecognizer.ERROR_NETWORK -> 3000L
+                    9 -> { wakeWordPaused = true; return } // not allowed
+                    else -> 800L
+                }
+                scheduleListenRestart(delay)
+            }
+
+            override fun onEndOfSpeech() { isListening = false }
+            override fun onRmsChanged(rmsdB: Float) {}
+            override fun onBufferReceived(buffer: ByteArray?) {}
+            override fun onPartialResults(partialResults: Bundle?) {}
+            override fun onEvent(eventType: Int, params: Bundle?) {}
+        })
+
+        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            // Accept both Hindi and English in same session
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, "hi-IN")
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, "hi-IN")
+            putExtra(RecognizerIntent.EXTRA_ONLY_RETURN_LANGUAGE_PREFERENCE, false)
+            putExtra("android.speech.extra.EXTRA_ADDITIONAL_LANGUAGES", arrayOf("en-IN", "en-US"))
+            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
+            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false)
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 2000L)
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 500L)
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 1500L)
+        }
+
+        try {
+            recognizer?.startListening(intent)
+        } catch (e: Exception) {
+            isListening = false
+            scheduleListenRestart(1000)
         }
     }
 
-    private fun stopCurrentRecognizer() {
+    private fun destroyRecognizer() {
         try {
             recognizer?.stopListening()
             recognizer?.destroy()
-            recognizer = null
         } catch (e: Exception) {}
+        recognizer = null
         isListening = false
-        sessionActive = false
     }
 
-    private fun handleTranscript(transcript: String) {
-        if (isSpeaking) {
-            // Picked up our own voice — ignore completely
-            Handler(Looper.getMainLooper()).postDelayed({ startContinuousListening() }, 500)
-            return
-        }
+    private fun handleTranscript(rawTranscript: String) {
+        if (isSpeaking) { scheduleListenRestart(1000); return }
+
+        val transcript = rawTranscript.lowercase().trim()
 
         // Duplicate guard
         val now = System.currentTimeMillis()
-        if (transcript == lastTranscript && (now - lastTranscriptTime) < DUPLICATE_GUARD_MS) {
-            Handler(Looper.getMainLooper()).postDelayed({ startContinuousListening() }, 300)
-            return
+        if (transcript == lastTranscript && (now - lastTranscriptTime) < DUPLICATE_GUARD) {
+            scheduleListenRestart(300); return
         }
         lastTranscript = transcript
         lastTranscriptTime = now
 
-        // Exit conversation mode
+        // Exit words
         if (conversationMode && EXIT_WORDS.any { transcript.contains(it) }) {
             conversationMode = false
             isProcessingCommand = false
             uiCallback?.invoke("idle", transcript, "")
-            speak("Going to sleep. Say Hey Saraswati to wake me.")
+            speak("Theek hai. Phir milenge.")
             return
         }
 
-        // In conversation mode — process as command
+        // Conversation mode — direct command
         if (conversationMode) {
-            val now2 = System.currentTimeMillis()
-            if (now2 - lastCommandTime < COMMAND_COOLDOWN_MS) {
-                // Too soon — ignore duplicate
-                Handler(Looper.getMainLooper()).postDelayed({ startContinuousListening() }, 300)
-                return
+            if (now - lastCommandTime < COMMAND_COOLDOWN) {
+                scheduleListenRestart(300); return
             }
-            lastCommandTime = now2
+            lastCommandTime = now
             isProcessingCommand = true
             wakeWordPaused = true
-            uiCallback?.invoke("thinking", transcript, "")
-            processCommand(transcript)
+            uiCallback?.invoke("thinking", rawTranscript, "")
+            processCommand(rawTranscript)
             return
         }
 
-        // Check for wake word
-        val heardWakeWord = WAKE_WORDS.any { transcript.contains(it) }
-        if (heardWakeWord) {
+        // Check wake word
+        val heardWake = WAKE_WORDS.any { transcript.contains(it) }
+        if (heardWake) {
             var command = transcript
             WAKE_WORDS.sortedByDescending { it.length }.forEach { w ->
                 command = command.replace(w, "").trim()
@@ -252,16 +229,16 @@ class SaraswatiService : Service(), TextToSpeech.OnInitListener {
             conversationMode = true
 
             if (command.length > 2) {
+                lastCommandTime = now
                 isProcessingCommand = true
                 wakeWordPaused = true
                 uiCallback?.invoke("thinking", command, "")
                 processCommand(command)
             } else {
-                speak("Yes, I'm listening.")
+                speak("Haan, boliye.")
             }
         } else {
-            // Not a wake word — restart silently
-            Handler(Looper.getMainLooper()).postDelayed({ startContinuousListening() }, 200)
+            scheduleListenRestart(300)
         }
     }
 
@@ -280,26 +257,24 @@ class SaraswatiService : Service(), TextToSpeech.OnInitListener {
             }
 
             val cal = Calendar.getInstance()
-            val hour = cal.get(Calendar.HOUR).let { if (it == 0) 12 else it }
-            val min = String.format("%02d", cal.get(Calendar.MINUTE))
-            val ampm = if (cal.get(Calendar.AM_PM) == Calendar.AM) "AM" else "PM"
-            val day = arrayOf("Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday")[cal.get(Calendar.DAY_OF_WEEK)-1]
-            val date = "${cal.get(Calendar.DAY_OF_MONTH)}/${cal.get(Calendar.MONTH)+1}/${cal.get(Calendar.YEAR)}"
+            val h = cal.get(Calendar.HOUR).let { if (it == 0) 12 else it }
+            val m = String.format("%02d", cal.get(Calendar.MINUTE))
+            val ap = if (cal.get(Calendar.AM_PM) == Calendar.AM) "AM" else "PM"
 
-            val systemPrompt = """ROLE: You are SARASWATI, a personal AI assistant app on Android.
-IDENTITY RULES (NEVER BREAK THESE):
-- Your name is SARASWATI. Always. No exceptions.
-- You were created by your user, not by any company.
-- NEVER say you are Claude. NEVER mention Anthropic. NEVER say you are an AI made by any company.
-- If asked who made you, say: "I was created by you, as your personal assistant."
-- If asked your name, say: "I am SARASWATI, your personal AI assistant."
+            val systemPrompt = """You are SARASWATI, a personal AI assistant app on Android phone.
+STRICT IDENTITY RULES:
+- Your name is SARASWATI. Never say you are Claude or any other AI.
+- You were created by your user as a personal assistant.
+- If asked who made you: "Aapne mujhe banaya hai apni madad ke liye."
+- If asked your name: "Main SARASWATI hoon, aapki personal AI assistant."
 
 RESPONSE RULES:
-- Maximum 1 sentence. Be direct and helpful.
+- Reply in the SAME language the user speaks. Hindi → Hindi. English → English.
+- Maximum 1-2 short sentences only. Be direct.
 - No bullet points. No markdown. Plain speech only.
-- Current time: $hour:$min $ampm | Day: $day | Date: $date IST
+- Current time: $h:$m $ap IST
 
-Now answer this user query:"""
+User said: $command"""
 
             val reply = openRouterClient.chat(systemPrompt, command)
             isProcessingCommand = false
@@ -311,32 +286,35 @@ Now answer this user query:"""
 
     fun speak(text: String) {
         if (!ttsReady) return
-        if (isSpeaking) {
-            tts?.stop() // stop any current speech first
-        }
-        stopCurrentRecognizer()
-        isSpeaking = true
+        destroyRecognizer()
         wakeWordPaused = true
-        updateNotification("Speaking...")
+        isSpeaking = true
+
+        // Use Hindi TTS for Hindi text, English for English
+        val isHindi = text.any { it.code in 0x0900..0x097F } ||
+            text.lowercase().let { t ->
+                listOf("haan", "nahi", "theek", "aap", "main", "karo", "hai", "mujhe", "aapka").any { t.contains(it) }
+            }
+
+        tts?.language = if (isHindi) Locale("hi", "IN") else Locale("en", "IN")
+
         val params = Bundle().apply {
             putString(TextToSpeech.Engine.KEY_PARAM_UTTERANCE_ID, "s_utt")
         }
+        updateNotification("Speaking...")
         tts?.speak(text, TextToSpeech.QUEUE_FLUSH, params, "s_utt")
 
-        // Safety fallback: if onDone never fires (some Android phones),
-        // force-reset after estimated speech duration + 3 seconds
-        val estimatedDurationMs = (text.length * 60L) + 3000L
+        // Fallback timer — force resume if onDone never fires
+        val timeout = (text.length * 80L) + 4000L
         Handler(Looper.getMainLooper()).postDelayed({
             if (isSpeaking) {
-                // onDone never fired — force reset
                 isSpeaking = false
-                sessionActive = false
                 wakeWordPaused = false
                 isProcessingCommand = false
                 uiCallback?.invoke("idle", "", "")
-                startContinuousListening()
+                scheduleListenRestart(500)
             }
-        }, estimatedDurationMs)
+        }, timeout)
     }
 
     private fun createNotificationChannel() {
@@ -381,7 +359,7 @@ Now answer this user query:"""
     override fun onDestroy() {
         super.onDestroy()
         serviceScope.cancel()
-        stopCurrentRecognizer()
+        destroyRecognizer()
         tts?.stop()
         tts?.shutdown()
         instance = null
