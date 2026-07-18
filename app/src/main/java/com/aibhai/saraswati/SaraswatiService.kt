@@ -54,11 +54,8 @@ class SaraswatiService : Service(), TextToSpeech.OnInitListener {
 
     override fun onInit(status: Int) {
         if (status == TextToSpeech.SUCCESS) {
-            // Prefer Hindi-capable engine with Indian English voice
-            tts?.language = Locale("hi", "IN").let { hi ->
-                if (tts?.isLanguageAvailable(hi) == TextToSpeech.LANG_AVAILABLE) hi
-                else Locale("en", "IN")
-            }
+            // Use en-IN — reliable on all phones
+            tts?.language = Locale("en", "IN")
             tts?.setSpeechRate(0.88f)
             tts?.setPitch(0.9f)
             ttsReady = true
@@ -155,20 +152,28 @@ class SaraswatiService : Service(), TextToSpeech.OnInitListener {
 
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-            // Accept both Hindi and English in same session
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE, "hi-IN")
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, "hi-IN")
-            putExtra(RecognizerIntent.EXTRA_ONLY_RETURN_LANGUAGE_PREFERENCE, false)
-            putExtra("android.speech.extra.EXTRA_ADDITIONAL_LANGUAGES", arrayOf("en-IN", "en-US"))
-            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
+            // Use en-IN — works on ALL Android phones without extra downloads
+            // Hindi words spoken in English transliteration also get recognized
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, "en-IN")
+            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false)
-            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 2000L)
-            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 500L)
-            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 1500L)
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 2500L)
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 300L)
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 1800L)
         }
 
         try {
             recognizer?.startListening(intent)
+
+            // Safety timeout — if stuck listening for 12 seconds, force restart
+            Handler(Looper.getMainLooper()).postDelayed({
+                if (isListening) {
+                    isListening = false
+                    destroyRecognizer()
+                    scheduleListenRestart(500)
+                }
+            }, 12000)
+
         } catch (e: Exception) {
             isListening = false
             scheduleListenRestart(1000)
@@ -290,13 +295,9 @@ User said: $command"""
         wakeWordPaused = true
         isSpeaking = true
 
-        // Use Hindi TTS for Hindi text, English for English
-        val isHindi = text.any { it.code in 0x0900..0x097F } ||
-            text.lowercase().let { t ->
-                listOf("haan", "nahi", "theek", "aap", "main", "karo", "hai", "mujhe", "aapka").any { t.contains(it) }
-            }
-
-        tts?.language = if (isHindi) Locale("hi", "IN") else Locale("en", "IN")
+        // Always use en-IN for reliable TTS on all phones
+        // hi-IN TTS often not installed on budget Android phones
+        tts?.language = Locale("en", "IN")
 
         val params = Bundle().apply {
             putString(TextToSpeech.Engine.KEY_PARAM_UTTERANCE_ID, "s_utt")
