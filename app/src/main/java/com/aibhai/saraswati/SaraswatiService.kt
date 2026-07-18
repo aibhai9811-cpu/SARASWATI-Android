@@ -34,6 +34,8 @@ class SaraswatiService : Service(), TextToSpeech.OnInitListener {
 
     // Controls mic restart — we restart ONCE after each cycle, not in a loop
     private var restartPending = false
+    // Auto-restart after each session (continuous wake word listening)
+    private val AUTO_RESTART_DELAY = 600L
 
     private val WAKE_WORDS = listOf("hey saraswati", "saraswati", "hi saraswati", "ok saraswati", "hello saraswati")
     private val EXIT_WORDS = listOf("stop", "exit", "goodbye", "go to sleep", "bye", "band karo", "ruko")
@@ -67,12 +69,13 @@ class SaraswatiService : Service(), TextToSpeech.OnInitListener {
                 }
                 override fun onDone(utteranceId: String?) {
                     isSpeaking = false
+                    wakeWordPaused = false
+                    isProcessingCommand = false
                     Handler(Looper.getMainLooper()).postDelayed({
-                        if (!wakeWordPaused && !isProcessingCommand) {
-                            uiCallback?.invoke("idle", "", "")
-                            scheduleListenRestart(1000)
-                        }
-                    }, 800)
+                        uiCallback?.invoke("idle", "", "")
+                        updateNotification("Say "Hey Saraswati" to activate")
+                        scheduleListenRestart(AUTO_RESTART_DELAY)
+                    }, 1200) // wait for speaker echo to clear
                 }
                 override fun onError(utteranceId: String?) {
                     isSpeaking = false
@@ -103,76 +106,82 @@ class SaraswatiService : Service(), TextToSpeech.OnInitListener {
         }, delayMs)
     }
 
-    private fun startListeningSession() {
-        if (isSpeaking || isProcessingCommand || wakeWordPaused || isListening) return
+    // ── SINGLE SHOT RECOGNITION — most reliable pattern on Android ──
+    // Uses Intent-based recognition (same as Google Assistant button)
+    // This avoids the SpeechRecognizer API bugs entirely
+    fun startListeningSession() {
+        if (isSpeaking || isProcessingCommand || isListening) return
+        isListening = true
+        uiCallback?.invoke("listening", "", "")
+        updateNotification("Listening... Speak now")
 
         destroyRecognizer()
         recognizer = SpeechRecognizer.createSpeechRecognizer(this)
         recognizer?.setRecognitionListener(object : RecognitionListener {
+            override fun onReadyForSpeech(params: Bundle?) {}
+            override fun onBeginningOfSpeech() {}
+            override fun onRmsChanged(rmsdB: Float) {}
+            override fun onBufferReceived(buffer: ByteArray?) {}
+            override fun onPartialResults(p: Bundle?) {}
+            override fun onEvent(e: Int, p: Bundle?) {}
 
-            override fun onReadyForSpeech(params: Bundle?) {
-                isListening = true
-                updateNotification("Listening...")
-            }
-
-            override fun onBeginningOfSpeech() {
-                uiCallback?.invoke("listening", "", "")
+            override fun onEndOfSpeech() {
+                // Good — speech captured, waiting for results
             }
 
             override fun onResults(results: Bundle?) {
                 isListening = false
+                uiCallback?.invoke("idle", "", "")
                 val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                val transcript = matches?.firstOrNull()?.trim() ?: run {
-                    scheduleListenRestart(300)
-                    return
+                val transcript = matches?.firstOrNull()?.trim() ?: ""
+                if (transcript.isNotBlank()) {
+                    handleTranscript(transcript)
+                } else {
+                    updateNotification("Say "Hey Saraswati" to activate")
+                    scheduleListenRestart(1000)
                 }
-                if (transcript.isNotBlank()) handleTranscript(transcript)
-                else scheduleListenRestart(300)
             }
 
             override fun onError(error: Int) {
                 isListening = false
+                uiCallback?.invoke("idle", "", "")
                 if (isSpeaking || isProcessingCommand || wakeWordPaused) return
-                val delay = when (error) {
-                    SpeechRecognizer.ERROR_NO_MATCH,
-                    SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> 500L
-                    SpeechRecognizer.ERROR_NETWORK -> 3000L
-                    9 -> { wakeWordPaused = true; return } // not allowed
-                    else -> 800L
+                when (error) {
+                    9 -> { wakeWordPaused = true; return } // mic not allowed
+                    SpeechRecognizer.ERROR_NETWORK,
+                    SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> {
+                        updateNotification("Network error. Retrying...")
+                        scheduleListenRestart(3000)
+                    }
+                    else -> scheduleListenRestart(800)
                 }
-                scheduleListenRestart(delay)
             }
-
-            override fun onEndOfSpeech() { isListening = false }
-            override fun onRmsChanged(rmsdB: Float) {}
-            override fun onBufferReceived(buffer: ByteArray?) {}
-            override fun onPartialResults(partialResults: Bundle?) {}
-            override fun onEvent(eventType: Int, params: Bundle?) {}
         })
 
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-            // Use en-IN — works on ALL Android phones without extra downloads
-            // Hindi words spoken in English transliteration also get recognized
             putExtra(RecognizerIntent.EXTRA_LANGUAGE, "en-IN")
             putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false)
-            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 2500L)
-            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 300L)
-            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 1800L)
+            // Short timeout — capture one phrase then return result immediately
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 1500L)
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 200L)
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 1000L)
         }
 
         try {
             recognizer?.startListening(intent)
 
-            // Safety timeout — if stuck listening for 12 seconds, force restart
+            // Hard 8-second timeout — prevents getting stuck EVER
             Handler(Looper.getMainLooper()).postDelayed({
                 if (isListening) {
                     isListening = false
                     destroyRecognizer()
+                    uiCallback?.invoke("idle", "", "")
+                    updateNotification("Say "Hey Saraswati" to activate")
                     scheduleListenRestart(500)
                 }
-            }, 12000)
+            }, 8000)
 
         } catch (e: Exception) {
             isListening = false
