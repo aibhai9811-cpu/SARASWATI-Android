@@ -19,26 +19,20 @@ class SaraswatiService : Service(), TextToSpeech.OnInitListener {
     }
 
     private var tts: TextToSpeech? = null
-    private var recognizer: SpeechRecognizer? = null
-    private var isListening = false
-    private var isSpeaking = false
-    private var conversationMode = false
-    private var wakeWordPaused = false
     private var ttsReady = false
+
+    // ── VOSK wake word detector ──
+    private var wakeWordDetector: WakeWordDetector? = null
+    private var voskReady = false
+
+    // ── Command recognizer (SpeechRecognizer — only used AFTER wake word) ──
+    private var commandRecognizer: SpeechRecognizer? = null
+    private var isCapturingCommand = false
+    private var isSpeaking = false
     private var isProcessingCommand = false
-    private var lastCommandTime = 0L
-    private val COMMAND_COOLDOWN = 2500L
-    private var lastTranscript = ""
-    private var lastTranscriptTime = 0L
-    private val DUPLICATE_GUARD = 3000L
 
-    // Controls mic restart — we restart ONCE after each cycle, not in a loop
-    private var restartPending = false
-    // Auto-restart after each session (continuous wake word listening)
-    private val AUTO_RESTART_DELAY = 600L
-
-    private val WAKE_WORDS = listOf("hey saraswati", "saraswati", "hi saraswati", "ok saraswati", "hello saraswati")
-    private val EXIT_WORDS = listOf("stop", "exit", "goodbye", "go to sleep", "bye", "band karo", "ruko")
+    private val EXIT_WORDS = listOf("stop", "exit", "goodbye", "go to sleep",
+        "bye", "band karo", "ruko", "sleep", "saraswati stop")
 
     private val serviceScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     private lateinit var commandProcessor: CommandProcessor
@@ -48,113 +42,100 @@ class SaraswatiService : Service(), TextToSpeech.OnInitListener {
         super.onCreate()
         instance = this
         createNotificationChannel()
-        startForeground(NOTIFICATION_ID, buildNotification("SARASWATI — Starting..."))
-        tts = TextToSpeech(this, this)
+        startForeground(NOTIFICATION_ID, buildNotification("SARASWATI — Initializing..."))
+
         commandProcessor = CommandProcessor(this)
         openRouterClient = OpenRouterClient(this)
+        tts = TextToSpeech(this, this)
+
+        // Initialize Vosk wake word detector
+        initVosk()
     }
 
-    override fun onInit(status: Int) {
-        if (status == TextToSpeech.SUCCESS) {
-            // Use en-IN — reliable on all phones
-            tts?.language = Locale("en", "IN")
-            tts?.setSpeechRate(0.88f)
-            tts?.setPitch(0.9f)
-            ttsReady = true
+    // ── VOSK INITIALIZATION ──
+    private fun initVosk() {
+        updateNotification("Loading wake word model...")
+        wakeWordDetector = WakeWordDetector(
+            context = this,
+            onWakeWordDetected = { command ->
+                if (!isSpeaking && !isProcessingCommand && !isCapturingCommand) {
+                    handleWakeWordDetected(command)
+                }
+            },
+            onError = { error ->
+                // Vosk failed — fall back to tap-to-talk only
+                updateNotification("Say tap mic to talk | Vosk: $error")
+                voskReady = false
+            }
+        )
 
-            tts?.setOnUtteranceProgressListener(object : android.speech.tts.UtteranceProgressListener() {
-                override fun onStart(utteranceId: String?) {
-                    isSpeaking = true
-                    destroyRecognizer()
-                }
-                override fun onDone(utteranceId: String?) {
-                    isSpeaking = false
-                    wakeWordPaused = false
-                    isProcessingCommand = false
-                    Handler(Looper.getMainLooper()).postDelayed({
-                        uiCallback?.invoke("idle", "", "")
-                        updateNotification("Say "Hey Saraswati" to activate")
-                        scheduleListenRestart(AUTO_RESTART_DELAY)
-                    }, 1200) // wait for speaker echo to clear
-                }
-                override fun onError(utteranceId: String?) {
-                    isSpeaking = false
-                    Handler(Looper.getMainLooper()).postDelayed({
-                        if (!wakeWordPaused && !isProcessingCommand)
-                            scheduleListenRestart(500)
-                    }, 500)
-                }
-            })
-
-            // Start listening after 2 seconds
-            Handler(Looper.getMainLooper()).postDelayed({
-                updateNotification("Say \"Hey Saraswati\" to activate")
-                uiCallback?.invoke("idle", "", "")
-                scheduleListenRestart(0)
-            }, 2000)
+        wakeWordDetector?.initialize {
+            // Model loaded — start silent listening
+            voskReady = true
+            updateNotification("Say \"Hey Saraswati\" to activate")
+            wakeWordDetector?.startListening()
+            uiCallback?.invoke("idle", "", "")
         }
     }
 
-    // ── SCHEDULE A SINGLE RESTART — never overlapping ──
-    private fun scheduleListenRestart(delayMs: Long) {
-        if (restartPending || isSpeaking || isProcessingCommand || wakeWordPaused) return
-        restartPending = true
-        Handler(Looper.getMainLooper()).postDelayed({
-            restartPending = false
-            if (!isSpeaking && !isProcessingCommand && !wakeWordPaused && !isListening)
-                startListeningSession()
-        }, delayMs)
+    // ── WAKE WORD DETECTED by Vosk ──
+    private fun handleWakeWordDetected(commandAfterWakeWord: String) {
+        wakeWordDetector?.pause() // pause vosk while we handle command
+
+        if (commandAfterWakeWord.length > 2) {
+            // Full command in one breath — process directly
+            uiCallback?.invoke("thinking", commandAfterWakeWord, "")
+            processCommand(commandAfterWakeWord)
+        } else {
+            // Just wake word — open mic for follow-up command
+            speak("Haan boliye.")
+            // After speaking, captureCommand() is called from onDone
+        }
     }
 
-    // ── SINGLE SHOT RECOGNITION — most reliable pattern on Android ──
-    // Uses Intent-based recognition (same as Google Assistant button)
-    // This avoids the SpeechRecognizer API bugs entirely
-    fun startListeningSession() {
-        if (isSpeaking || isProcessingCommand || isListening) return
-        isListening = true
+    // ── CAPTURE COMMAND via SpeechRecognizer (only after wake word) ──
+    fun captureCommand() {
+        if (isCapturingCommand || isSpeaking) return
+        isCapturingCommand = true
         uiCallback?.invoke("listening", "", "")
-        updateNotification("Listening... Speak now")
+        updateNotification("Listening for your command...")
 
-        destroyRecognizer()
-        recognizer = SpeechRecognizer.createSpeechRecognizer(this)
-        recognizer?.setRecognitionListener(object : RecognitionListener {
+        commandRecognizer?.destroy()
+        commandRecognizer = SpeechRecognizer.createSpeechRecognizer(this)
+        commandRecognizer?.setRecognitionListener(object : RecognitionListener {
+
             override fun onReadyForSpeech(params: Bundle?) {}
             override fun onBeginningOfSpeech() {}
             override fun onRmsChanged(rmsdB: Float) {}
             override fun onBufferReceived(buffer: ByteArray?) {}
             override fun onPartialResults(p: Bundle?) {}
             override fun onEvent(e: Int, p: Bundle?) {}
-
-            override fun onEndOfSpeech() {
-                // Good — speech captured, waiting for results
-            }
+            override fun onEndOfSpeech() {}
 
             override fun onResults(results: Bundle?) {
-                isListening = false
-                uiCallback?.invoke("idle", "", "")
+                isCapturingCommand = false
                 val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                 val transcript = matches?.firstOrNull()?.trim() ?: ""
+                uiCallback?.invoke("idle", "", "")
+
                 if (transcript.isNotBlank()) {
-                    handleTranscript(transcript)
+                    val lower = transcript.lowercase()
+                    if (EXIT_WORDS.any { lower.contains(it) }) {
+                        speak("Theek hai. Jab zarurat ho, Hey Saraswati boliye.")
+                    } else {
+                        uiCallback?.invoke("thinking", transcript, "")
+                        processCommand(transcript)
+                    }
                 } else {
-                    updateNotification("Say "Hey Saraswati" to activate")
-                    scheduleListenRestart(1000)
+                    // Nothing heard — resume vosk
+                    resumeVosk()
                 }
             }
 
             override fun onError(error: Int) {
-                isListening = false
+                isCapturingCommand = false
                 uiCallback?.invoke("idle", "", "")
-                if (isSpeaking || isProcessingCommand || wakeWordPaused) return
-                when (error) {
-                    9 -> { wakeWordPaused = true; return } // mic not allowed
-                    SpeechRecognizer.ERROR_NETWORK,
-                    SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> {
-                        updateNotification("Network error. Retrying...")
-                        scheduleListenRestart(3000)
-                    }
-                    else -> scheduleListenRestart(800)
-                }
+                resumeVosk()
             }
         })
 
@@ -163,108 +144,44 @@ class SaraswatiService : Service(), TextToSpeech.OnInitListener {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE, "en-IN")
             putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false)
-            // Short timeout — capture one phrase then return result immediately
-            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 1500L)
-            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 200L)
-            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 1000L)
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 2000L)
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 300L)
         }
 
         try {
-            recognizer?.startListening(intent)
-
-            // Hard 8-second timeout — prevents getting stuck EVER
+            commandRecognizer?.startListening(intent)
+            // 10 second hard timeout
             Handler(Looper.getMainLooper()).postDelayed({
-                if (isListening) {
-                    isListening = false
-                    destroyRecognizer()
+                if (isCapturingCommand) {
+                    isCapturingCommand = false
+                    commandRecognizer?.stopListening()
                     uiCallback?.invoke("idle", "", "")
-                    updateNotification("Say "Hey Saraswati" to activate")
-                    scheduleListenRestart(500)
+                    resumeVosk()
                 }
-            }, 8000)
-
+            }, 10000)
         } catch (e: Exception) {
-            isListening = false
-            scheduleListenRestart(1000)
+            isCapturingCommand = false
+            resumeVosk()
         }
     }
 
-    private fun destroyRecognizer() {
-        try {
-            recognizer?.stopListening()
-            recognizer?.destroy()
-        } catch (e: Exception) {}
-        recognizer = null
-        isListening = false
+    private fun resumeVosk() {
+        isProcessingCommand = false
+        isSpeaking = false
+        updateNotification("Say \"Hey Saraswati\" to activate")
+        uiCallback?.invoke("idle", "", "")
+        wakeWordDetector?.resume()
     }
 
-    private fun handleTranscript(rawTranscript: String) {
-        if (isSpeaking) { scheduleListenRestart(1000); return }
-
-        val transcript = rawTranscript.lowercase().trim()
-
-        // Duplicate guard
-        val now = System.currentTimeMillis()
-        if (transcript == lastTranscript && (now - lastTranscriptTime) < DUPLICATE_GUARD) {
-            scheduleListenRestart(300); return
-        }
-        lastTranscript = transcript
-        lastTranscriptTime = now
-
-        // Exit words
-        if (conversationMode && EXIT_WORDS.any { transcript.contains(it) }) {
-            conversationMode = false
-            isProcessingCommand = false
-            uiCallback?.invoke("idle", transcript, "")
-            speak("Theek hai. Phir milenge.")
-            return
-        }
-
-        // Conversation mode — direct command
-        if (conversationMode) {
-            if (now - lastCommandTime < COMMAND_COOLDOWN) {
-                scheduleListenRestart(300); return
-            }
-            lastCommandTime = now
-            isProcessingCommand = true
-            wakeWordPaused = true
-            uiCallback?.invoke("thinking", rawTranscript, "")
-            processCommand(rawTranscript)
-            return
-        }
-
-        // Check wake word
-        val heardWake = WAKE_WORDS.any { transcript.contains(it) }
-        if (heardWake) {
-            var command = transcript
-            WAKE_WORDS.sortedByDescending { it.length }.forEach { w ->
-                command = command.replace(w, "").trim()
-            }
-            conversationMode = true
-
-            if (command.length > 2) {
-                lastCommandTime = now
-                isProcessingCommand = true
-                wakeWordPaused = true
-                uiCallback?.invoke("thinking", command, "")
-                processCommand(command)
-            } else {
-                speak("Haan, boliye.")
-            }
-        } else {
-            scheduleListenRestart(300)
-        }
-    }
-
+    // ── PROCESS COMMAND ──
     private fun processCommand(command: String) {
+        isProcessingCommand = true
         serviceScope.launch {
             uiCallback?.invoke("thinking", command, "")
             updateNotification("Processing...")
 
             val phoneResult = commandProcessor.tryHandleLocally(command)
             if (phoneResult != null) {
-                isProcessingCommand = false
-                wakeWordPaused = false
                 uiCallback?.invoke("speaking", "", phoneResult)
                 speak(phoneResult)
                 return@launch
@@ -275,58 +192,72 @@ class SaraswatiService : Service(), TextToSpeech.OnInitListener {
             val m = String.format("%02d", cal.get(Calendar.MINUTE))
             val ap = if (cal.get(Calendar.AM_PM) == Calendar.AM) "AM" else "PM"
 
-            val systemPrompt = """You are SARASWATI, a personal AI assistant app on Android phone.
-STRICT IDENTITY RULES:
-- Your name is SARASWATI. Never say you are Claude or any other AI.
-- You were created by your user as a personal assistant.
-- If asked who made you: "Aapne mujhe banaya hai apni madad ke liye."
-- If asked your name: "Main SARASWATI hoon, aapki personal AI assistant."
-
-RESPONSE RULES:
-- Reply in the SAME language the user speaks. Hindi → Hindi. English → English.
-- Maximum 1-2 short sentences only. Be direct.
-- No bullet points. No markdown. Plain speech only.
-- Current time: $h:$m $ap IST
-
-User said: $command"""
+            val systemPrompt = """You are SARASWATI, a personal AI assistant.
+IDENTITY: Your name is SARASWATI. Never say you are Claude or made by Anthropic.
+If asked who made you: "Aapne mujhe banaya hai."
+RESPONSE: 1 sentence only. No markdown. Plain speech.
+Time: $h:$m $ap IST"""
 
             val reply = openRouterClient.chat(systemPrompt, command)
             isProcessingCommand = false
-            wakeWordPaused = false
             uiCallback?.invoke("speaking", "", reply)
             speak(reply)
         }
     }
 
+    // ── TTS ──
+    override fun onInit(status: Int) {
+        if (status == TextToSpeech.SUCCESS) {
+            tts?.language = Locale("en", "IN")
+            tts?.setSpeechRate(0.9f)
+            tts?.setPitch(0.9f)
+            ttsReady = true
+
+            tts?.setOnUtteranceProgressListener(object : android.speech.tts.UtteranceProgressListener() {
+                override fun onStart(utteranceId: String?) {
+                    isSpeaking = true
+                    uiCallback?.invoke("speaking", "", "")
+                }
+                override fun onDone(utteranceId: String?) {
+                    isSpeaking = false
+                    isProcessingCommand = false
+                    Handler(Looper.getMainLooper()).postDelayed({
+                        // After speaking — open mic for follow-up command
+                        captureCommand()
+                    }, 800)
+                }
+                override fun onError(utteranceId: String?) {
+                    isSpeaking = false
+                    isProcessingCommand = false
+                    Handler(Looper.getMainLooper()).postDelayed({
+                        resumeVosk()
+                    }, 500)
+                }
+            })
+        }
+    }
+
     fun speak(text: String) {
         if (!ttsReady) return
-        destroyRecognizer()
-        wakeWordPaused = true
         isSpeaking = true
-
-        // Always use en-IN for reliable TTS on all phones
-        // hi-IN TTS often not installed on budget Android phones
         tts?.language = Locale("en", "IN")
-
         val params = Bundle().apply {
             putString(TextToSpeech.Engine.KEY_PARAM_UTTERANCE_ID, "s_utt")
         }
-        updateNotification("Speaking...")
         tts?.speak(text, TextToSpeech.QUEUE_FLUSH, params, "s_utt")
 
-        // Fallback timer — force resume if onDone never fires
+        // Safety fallback
         val timeout = (text.length * 80L) + 4000L
         Handler(Looper.getMainLooper()).postDelayed({
             if (isSpeaking) {
                 isSpeaking = false
-                wakeWordPaused = false
                 isProcessingCommand = false
-                uiCallback?.invoke("idle", "", "")
-                scheduleListenRestart(500)
+                Handler(Looper.getMainLooper()).post { captureCommand() }
             }
         }, timeout)
     }
 
+    // ── NOTIFICATION ──
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
@@ -358,7 +289,7 @@ User said: $command"""
             .build()
     }
 
-    private fun updateNotification(text: String) {
+    fun updateNotification(text: String) {
         getSystemService(NotificationManager::class.java)
             ?.notify(NOTIFICATION_ID, buildNotification(text))
     }
@@ -369,7 +300,8 @@ User said: $command"""
     override fun onDestroy() {
         super.onDestroy()
         serviceScope.cancel()
-        destroyRecognizer()
+        wakeWordDetector?.stop()
+        commandRecognizer?.destroy()
         tts?.stop()
         tts?.shutdown()
         instance = null
