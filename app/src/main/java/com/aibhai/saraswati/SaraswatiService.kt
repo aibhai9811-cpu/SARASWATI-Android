@@ -81,15 +81,18 @@ class SaraswatiService : Service(), TextToSpeech.OnInitListener {
     // ── WAKE WORD DETECTED by Vosk ──
     private fun handleWakeWordDetected(commandAfterWakeWord: String) {
         wakeWordDetector?.pause() // pause vosk while we handle command
+        uiCallback?.invoke("listening", "", "")
 
         if (commandAfterWakeWord.length > 2) {
             // Full command in one breath — process directly
             uiCallback?.invoke("thinking", commandAfterWakeWord, "")
             processCommand(commandAfterWakeWord)
         } else {
-            // Just wake word — open mic for follow-up command
-            speak("Haan boliye.")
-            // After speaking, captureCommand() is called from onDone
+            // Just wake word heard — immediately open mic for command
+            // DON'T speak first (causes delay) — just open mic right away
+            Handler(Looper.getMainLooper()).postDelayed({
+                captureCommand()
+            }, 300)
         }
     }
 
@@ -116,26 +119,41 @@ class SaraswatiService : Service(), TextToSpeech.OnInitListener {
                 isCapturingCommand = false
                 val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                 val transcript = matches?.firstOrNull()?.trim() ?: ""
-                uiCallback?.invoke("idle", "", "")
 
                 if (transcript.isNotBlank()) {
                     val lower = transcript.lowercase()
                     if (EXIT_WORDS.any { lower.contains(it) }) {
+                        // User said stop/exit — go back to wake word mode
+                        uiCallback?.invoke("idle", "", "")
                         speak("Theek hai. Jab zarurat ho, Hey Saraswati boliye.")
+                        // resumeVosk() called from TTS onDone after speaking
                     } else {
+                        // Process command — mic will reopen after response via TTS onDone
                         uiCallback?.invoke("thinking", transcript, "")
                         processCommand(transcript)
                     }
                 } else {
-                    // Nothing heard — resume vosk
-                    resumeVosk()
+                    // Nothing heard — stay in command mode, try again
+                    uiCallback?.invoke("listening", "", "")
+                    Handler(Looper.getMainLooper()).postDelayed({
+                        captureCommand()
+                    }, 500)
                 }
             }
 
             override fun onError(error: Int) {
                 isCapturingCommand = false
                 uiCallback?.invoke("idle", "", "")
-                resumeVosk()
+                when (error) {
+                    SpeechRecognizer.ERROR_NO_MATCH,
+                    SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> {
+                        // No speech — try again once more before going back to vosk
+                        Handler(Looper.getMainLooper()).postDelayed({
+                            captureCommand()
+                        }, 500)
+                    }
+                    else -> resumeVosk()
+                }
             }
         })
 
@@ -222,15 +240,17 @@ Time: $h:$m $ap IST"""
                     isSpeaking = false
                     isProcessingCommand = false
                     Handler(Looper.getMainLooper()).postDelayed({
-                        // After speaking — open mic for follow-up command
-                        captureCommand()
+                        // After speaking — keep mic open for follow-up command
+                        // This enables conversation mode without repeating wake word
+                        if (!isCapturingCommand) captureCommand()
                     }, 800)
                 }
                 override fun onError(utteranceId: String?) {
                     isSpeaking = false
                     isProcessingCommand = false
                     Handler(Looper.getMainLooper()).postDelayed({
-                        resumeVosk()
+                        // Fallback: if TTS fails, resume Vosk wake word mode
+                        if (!isCapturingCommand) resumeVosk()
                     }, 500)
                 }
             })
@@ -246,13 +266,16 @@ Time: $h:$m $ap IST"""
         }
         tts?.speak(text, TextToSpeech.QUEUE_FLUSH, params, "s_utt")
 
-        // Safety fallback
-        val timeout = (text.length * 80L) + 4000L
+        // Safety fallback — if TTS onDone never fires on this phone,
+        // force-reset after estimated speech duration + 3 seconds
+        val timeout = (text.length * 80L) + 3000L
         Handler(Looper.getMainLooper()).postDelayed({
             if (isSpeaking) {
                 isSpeaking = false
                 isProcessingCommand = false
-                Handler(Looper.getMainLooper()).post { captureCommand() }
+                uiCallback?.invoke("idle", "", "")
+                // Open mic for follow-up command
+                if (!isCapturingCommand) captureCommand()
             }
         }, timeout)
     }
