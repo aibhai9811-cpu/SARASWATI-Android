@@ -20,14 +20,15 @@ jobs:
     - name: Setup Android SDK
       uses: android-actions/setup-android@v3
 
-    - name: Show full repo structure
+    - name: Download Vosk Small English-India Model
       run: |
-        echo "=== ROOT FILES ==="
-        ls -la
-        echo "=== ALL GRADLE FILES ==="
-        find . -name "*.gradle" | sort
-        echo "=== SETTINGS FILES ==="
-        find . -name "settings.gradle" | sort
+        mkdir -p app/src/main/assets
+        echo "Downloading Vosk model..."
+        wget -q "https://alphacephei.com/vosk/models/vosk-model-small-en-in-0.4.zip" -O vosk-model.zip
+        unzip -q vosk-model.zip -d app/src/main/assets/
+        mv app/src/main/assets/vosk-model-small-en-in-0.4 app/src/main/assets/vosk-model-small-en-in
+        echo "SARASWATI Vosk Model" > app/src/main/assets/vosk-model-small-en-in/README
+        echo "Model size: $(du -sh app/src/main/assets/vosk-model-small-en-in | cut -f1)"
 
     - name: Build APK
       run: |
@@ -35,14 +36,11 @@ jobs:
         unzip -q gradle-8.1.1-bin.zip
         GRADLE=$(pwd)/gradle-8.1.1/bin/gradle
         chmod +x $GRADLE
-        # Run from repo root where settings.gradle should be
         $GRADLE assembleDebug --stacktrace
-
-    - name: Find APK
-      run: find . -name "*.apk" | sort
 
     - name: Upload APK
       uses: actions/upload-artifact@v4
       with:
         name: SARASWATI-APK
-        path: "**/*.apk"
+        path: app/build/outputs/apk/debug/app-debug.apk
+        retention-days: 30
