@@ -17,15 +17,25 @@ import java.io.IOException
 
 class WakeWordDetector(
     private val context: Context,
-    private val onWakeWordDetected: (String) -> Unit, // passes any command after wake word
-    private val onError: (String) -> Unit
+    private val onWakeWordDetected: (String) -> Unit,
+    private val onError: (String) -> Unit,
+    val onDebugText: ((String) -> Unit)? = null // shows what Vosk hears on screen
 ) {
     companion object {
         private const val TAG = "WakeWordDetector"
         private const val SAMPLE_RATE = 16000
+        // Very broad list — Vosk small model has limited accuracy
+        // Include phonetic variations of how Indians pronounce "saraswati"
         val WAKE_WORDS = listOf(
+            // Standard variations
             "hey saraswati", "saraswati", "hi saraswati",
-            "ok saraswati", "hello saraswati", "hey sara"
+            "ok saraswati", "hello saraswati", "hey sara",
+            // Phonetic variations Vosk might transcribe
+            "hey sara swati", "sara swati", "saraswathy",
+            "sarasvati", "sara", "sarras", "saras",
+            // Common mishearing by speech engine
+            "hey sorry swati", "hey sorry", "saraswathy",
+            "sorry swati", "saras wati", "sarswati"
         )
     }
 
@@ -71,28 +81,42 @@ class WakeWordDetector(
                 override fun onPartialResult(hypothesis: String?) {
                     if (hypothesis.isNullOrBlank() || isPaused) return
                     val text = parseResult(hypothesis).lowercase()
-                    if (text.length > 2) checkForWakeWord(text, partial = true)
+                    if (text.length > 2) {
+                        Log.d(TAG, "Vosk partial: '$text'")
+                        // Show what Vosk hears on screen via callback
+                        onDebugText?.invoke("Vosk hearing: $text")
+                        checkForWakeWord(text, partial = true)
+                    }
                 }
 
                 override fun onResult(hypothesis: String?) {
                     if (hypothesis.isNullOrBlank() || isPaused) return
                     val text = parseResult(hypothesis).lowercase()
-                    if (text.length > 2) checkForWakeWord(text, partial = false)
+                    if (text.length > 2) {
+                        Log.d(TAG, "Vosk result: '$text'")
+                        onDebugText?.invoke("Vosk heard: $text")
+                        checkForWakeWord(text, partial = false)
+                    }
                 }
 
                 override fun onFinalResult(hypothesis: String?) {
                     if (!hypothesis.isNullOrBlank() && !isPaused) {
                         val text = parseResult(hypothesis).lowercase()
-                        if (text.length > 2) checkForWakeWord(text, partial = false)
+                        if (text.length > 2) {
+                            Log.d(TAG, "Vosk final: '$text'")
+                            checkForWakeWord(text, partial = false)
+                        }
                     }
                 }
 
                 override fun onError(exception: Exception?) {
                     Log.e(TAG, "Vosk error: ${exception?.message}")
+                    onDebugText?.invoke("Vosk error: ${exception?.message}")
                 }
 
                 override fun onTimeout() {
                     Log.d(TAG, "Vosk timeout")
+                    onDebugText?.invoke("Vosk timeout - restarting")
                 }
             })
             isRunning = true
