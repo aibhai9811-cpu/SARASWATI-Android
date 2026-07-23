@@ -63,9 +63,14 @@ class SaraswatiService : Service(), TextToSpeech.OnInitListener {
                 }
             },
             onError = { error ->
-                // Vosk failed — fall back to tap-to-talk only
-                updateNotification("Say tap mic to talk | Vosk: $error")
+                updateNotification("Vosk error: $error")
                 voskReady = false
+            },
+            onDebugText = { text ->
+                // Show on screen what Vosk is hearing so we know if it is working
+                Handler(Looper.getMainLooper()).post {
+                    uiCallback?.invoke("idle", text, "")
+                }
             }
         )
 
@@ -80,16 +85,16 @@ class SaraswatiService : Service(), TextToSpeech.OnInitListener {
 
     // ── WAKE WORD DETECTED by Vosk ──
     private fun handleWakeWordDetected(commandAfterWakeWord: String) {
-        wakeWordDetector?.pause() // pause vosk while we handle command
-        uiCallback?.invoke("listening", "", "")
+        wakeWordDetector?.pause()
+
+        // Show on screen so we know Vosk triggered
+        uiCallback?.invoke("listening", "✓ Wake word detected!", "")
+        updateNotification("Wake word detected! Listening for command...")
 
         if (commandAfterWakeWord.length > 2) {
-            // Full command in one breath — process directly
             uiCallback?.invoke("thinking", commandAfterWakeWord, "")
             processCommand(commandAfterWakeWord)
         } else {
-            // Just wake word heard — immediately open mic for command
-            // DON'T speak first (causes delay) — just open mic right away
             Handler(Looper.getMainLooper()).postDelayed({
                 captureCommand()
             }, 300)
