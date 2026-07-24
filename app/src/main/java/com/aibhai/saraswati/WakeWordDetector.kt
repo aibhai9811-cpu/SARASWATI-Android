@@ -26,16 +26,26 @@ class WakeWordDetector(
         private const val SAMPLE_RATE = 16000
         // Very broad list — Vosk small model has limited accuracy
         // Include phonetic variations of how Indians pronounce "saraswati"
+        // These are the EXACT strings Vosk transcribes when user says "Hey/Hello Saraswati"
+        // Collected from real device testing — add more as discovered
         val WAKE_WORDS = listOf(
-            // Standard variations
-            "hey saraswati", "saraswati", "hi saraswati",
-            "ok saraswati", "hello saraswati", "hey sara",
-            // Phonetic variations Vosk might transcribe
-            "hey sara swati", "sara swati", "saraswathy",
-            "sarasvati", "sara", "sarras", "saras",
-            // Common mishearing by speech engine
-            "hey sorry swati", "hey sorry", "saraswathy",
-            "sorry swati", "saras wati", "sarswati"
+            // What Vosk actually hears for "Hello/Hey Saraswati"
+            "hello source", "hello sources", "hello sweetie",
+            "hello thumb", "halo four", "hello source or",
+            "hey source", "hey sources", "hey sweetie",
+            "hey thumb", "hey source or",
+            // Direct variations
+            "hey saraswati", "hello saraswati", "hi saraswati",
+            "ok saraswati", "saraswati",
+            // Single word triggers that Vosk reliably hears
+            "sweetie",      // Vosk hears "saraswati" as "sweetie"
+            "sources",      // Vosk hears "saraswati" as "sources"
+            // Extra phonetic fallbacks
+            "sara", "source wati", "sara swati",
+            "hello sara", "hey sara", "hi sara",
+            "hello swati", "hey swati",
+            "source or two", "source two",
+            "halo four forty", "halo four"
         )
     }
 
